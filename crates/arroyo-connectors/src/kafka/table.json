@@ -75,6 +75,11 @@
                             "type": "string",
                             "title": "timestamp field",
                             "description": "Field to use to set the timestamp of the message written to Kafka; defaults to the event time"
+                        },
+                        "topic_field": {
+                            "type": "string",
+                            "title": "topic field",
+                            "description": "Field to use to dynamically route messages to different topics. Each message will be sent to the topic specified in this field. Either 'topic' or 'topic_field' must be set."
                         }
                     },
                     "additionalProperties": false,

@@ -162,6 +162,7 @@ impl KafkaConnector {
                     },
                     timestamp_field: options.pull_opt_str("sink.timestamp_field")?,
                     key_field: options.pull_opt_str("sink.key_field")?,
+                    topic_field: options.pull_opt_str("sink.topic_field")?,
                 }
             }
             _ => {
@@ -172,19 +173,30 @@ impl KafkaConnector {
         let topic = options.pull_opt_str("topic")?;
         let topic_pattern = options.pull_opt_str("topic_pattern")?;
 
-        // Validate: exactly one of topic or topic_pattern must be set
-        match (&topic, &topic_pattern) {
-            (None, None) => bail!("Either 'topic' or 'topic_pattern' must be specified"),
-            (Some(_), Some(_)) => bail!("Cannot specify both 'topic' and 'topic_pattern'"),
-            _ => {}
-        }
-
-        // Validate: topic_pattern can only be used with source tables
-        if topic_pattern.is_some() {
-            match &table_type {
-                TableType::Source { .. } => {}
-                TableType::Sink { .. } => {
-                    bail!("'topic_pattern' can only be used with source tables, not sinks")
+        // Validate based on table type
+        match &table_type {
+            TableType::Source { .. } => {
+                // Source: exactly one of topic or topic_pattern must be set
+                match (&topic, &topic_pattern) {
+                    (None, None) => {
+                        bail!("Either 'topic' or 'topic_pattern' must be specified for source")
+                    }
+                    (Some(_), Some(_)) => bail!("Cannot specify both 'topic' and 'topic_pattern'"),
+                    _ => {}
+                }
+            }
+            TableType::Sink { topic_field, .. } => {
+                // Sink: topic_pattern not allowed
+                if topic_pattern.is_some() {
+                    bail!("'topic_pattern' can only be used with source tables, not sinks");
+                }
+                // Sink: exactly one of topic or topic_field must be set
+                match (&topic, topic_field) {
+                    (None, None) => {
+                        bail!("Either 'topic' or 'topic_field' must be specified for sink")
+                    }
+                    (Some(_), Some(_)) => bail!("Cannot specify both 'topic' and 'topic_field'"),
+                    _ => {}
                 }
             }
         }
@@ -478,6 +490,7 @@ impl Connector for KafkaConnector {
                 commit_mode,
                 key_field,
                 timestamp_field,
+                topic_field,
             } => Ok(ConstructedOperator::from_operator(Box::new(
                 KafkaSinkFunc {
                     bootstrap_servers: profile.bootstrap_servers.to_string(),
@@ -487,11 +500,12 @@ impl Connector for KafkaConnector {
                     timestamp_col: None,
                     key_field: key_field.clone(),
                     key_col: None,
+                    topic: table.topic.clone(),
+                    topic_field: topic_field.clone(),
+                    topic_col: None,
                     write_futures: vec![],
                     client_config: client_configs(&profile, Some(table.clone()))?,
                     context: Context::new(Some(profile.clone())),
-                    // Safe to unwrap: validation ensures sink tables have a topic
-                    topic: table.topic.clone().expect("Sink tables must have a topic"),
                     serializer: ArrowSerializer::new(
                         config.format.expect("Format must be defined for KafkaSink"),
                     ),
