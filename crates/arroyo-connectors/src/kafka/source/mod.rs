@@ -24,7 +24,7 @@ use arroyo_rpc::schema_resolver::SchemaResolver;
 use arroyo_rpc::{ControlMessage, MetadataField, connector_err, grpc::rpc::StopMode};
 use arroyo_types::*;
 
-use super::{Context, SourceOffset, StreamConsumer};
+use super::{Context, RebalanceEvent, SourceOffset, StreamConsumer};
 
 #[cfg(test)]
 mod test;
@@ -53,25 +53,27 @@ pub struct KafkaState {
     offset: i64,
 }
 
-/// Key for storing Kafka state: (topic, partition)
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq, Hash)]
-pub struct KafkaStateKey {
-    topic: String,
-    partition: i32,
-}
-
 impl KafkaSourceFunc {
     /// Returns the topic name for display purposes (either the exact topic or the pattern)
     fn topic_display(&self) -> String {
         self.topic.clone().unwrap_or_else(|| {
             self.topic_pattern
                 .clone()
-                .map(|p| format!("pattern:{}", p))
+                .map(|p| format!("pattern:{p}"))
                 .unwrap_or_else(|| "unknown".to_string())
         })
     }
 
-    async fn get_consumer(&mut self, ctx: &mut SourceContext) -> anyhow::Result<StreamConsumer> {
+    async fn get_consumer(
+        &mut self,
+        ctx: &mut SourceContext,
+    ) -> anyhow::Result<(
+        StreamConsumer,
+        Option<(
+            tokio::sync::mpsc::UnboundedReceiver<RebalanceEvent>,
+            HashMap<String, KafkaState>,
+        )>,
+    )> {
         info!("Creating kafka consumer for {}", self.bootstrap_servers);
         let mut client_config = ClientConfig::new();
 
@@ -101,18 +103,13 @@ impl KafkaSourceFunc {
         for (key, value) in &self.client_configs {
             client_config.set(key, value);
         }
-        let consumer: StreamConsumer = client_config
+
+        // Common config (don't create consumer yet - pattern vs single-topic use different contexts)
+        client_config
             .set("bootstrap.servers", &self.bootstrap_servers)
             .set("enable.partition.eof", "false")
             .set("enable.auto.commit", "false")
-            .set("group.id", &group_id)
-            .create_with_context(self.context.clone())?;
-
-        // NOTE: this is required to trigger an oauth token refresh (when using
-        // OAUTHBEARER auth).
-        if consumer.recv().now_or_never().is_some() {
-            bail!("unexpected recv before assignments");
-        }
+            .set("group.id", &group_id);
 
         // Handle topic pattern subscription (uses Kafka's group coordination)
         if let Some(pattern) = &self.topic_pattern {
@@ -121,11 +118,50 @@ impl KafkaSourceFunc {
                 pattern, group_id
             );
 
-            // rdkafka expects patterns to start with '^' for regex matching
+            // Load saved state for offset restoration during rebalance
+            let saved_state: HashMap<String, KafkaState> = match ctx
+                .table_manager
+                .get_global_keyed_state::<String, KafkaState>("k")
+                .await
+            {
+                Ok(s) => s
+                    .get_all()
+                    .values()
+                    .map(|s| (format!("{}:{}", s.topic, s.partition), s.clone()))
+                    .collect(),
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize kafka state (possible version change), starting fresh: {}",
+                        e
+                    );
+                    HashMap::new()
+                }
+            };
+
+            if !saved_state.is_empty() {
+                info!(
+                    "Loaded {} saved partition offsets for pattern subscription",
+                    saved_state.len()
+                );
+            }
+
+            // Create rebalance channel
+            let (rebalance_tx, rebalance_rx) = tokio::sync::mpsc::unbounded_channel();
+            let pattern_context = self.context.clone().with_rebalance_tx(rebalance_tx);
+
+            // Create consumer with rebalance-enabled context
+            let consumer: StreamConsumer = client_config.create_with_context(pattern_context)?;
+
+            // NOTE: this is required to trigger an oauth token refresh (when using
+            // OAUTHBEARER auth).
+            if consumer.recv().now_or_never().is_some() {
+                bail!("unexpected recv before assignments");
+            }
+
             let pattern_str = if pattern.starts_with('^') {
                 pattern.clone()
             } else {
-                format!("^{}", pattern)
+                format!("^{pattern}")
             };
 
             consumer
@@ -137,28 +173,42 @@ impl KafkaSourceFunc {
                 pattern_str
             );
 
-            return Ok(consumer);
+            return Ok((consumer, Some((rebalance_rx, saved_state))));
         }
 
         // Handle single topic (existing behavior with manual partition assignment)
+        let consumer: StreamConsumer = client_config.create_with_context(self.context.clone())?;
+
+        // NOTE: this is required to trigger an oauth token refresh (when using
+        // OAUTHBEARER auth).
+        if consumer.recv().now_or_never().is_some() {
+            bail!("unexpected recv before assignments");
+        }
+
         let topic = self.topic.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Either 'topic' or 'topic_pattern' must be specified")
         })?;
 
-        let state: Vec<_> = ctx
+        let state: Vec<_> = match ctx
             .table_manager
-            .get_global_keyed_state::<KafkaStateKey, KafkaState>("k")
-            .await?
-            .get_all()
-            .values()
-            .collect();
+            .get_global_keyed_state::<String, KafkaState>("k")
+            .await
+        {
+            Ok(s) => s.get_all().values().collect(),
+            Err(e) => {
+                warn!(
+                    "Failed to deserialize kafka state (possible version change), starting fresh: {}",
+                    e
+                );
+                vec![]
+            }
+        };
 
-        // did we restore any partitions?
         let has_state = !state.is_empty();
 
-        let state: HashMap<(String, i32), KafkaState> = state
+        let state: HashMap<String, KafkaState> = state
             .iter()
-            .map(|s| ((s.topic.clone(), s.partition), (*s).clone()))
+            .map(|s| (format!("{}:{}", s.topic, s.partition), (*s).clone()))
             .collect();
         let metadata = consumer.fetch_metadata(Some(topic), Duration::from_secs(30))?;
 
@@ -174,7 +224,7 @@ impl KafkaSourceFunc {
                 })
                 .map(|(_, p)| {
                     let offset = state
-                        .get(&(topic.clone(), p.id()))
+                        .get(&format!("{}:{}", topic, p.id()))
                         .map(|s| Offset::Offset(s.offset))
                         .unwrap_or_else(|| {
                             if has_state {
@@ -200,7 +250,7 @@ impl KafkaSourceFunc {
 
         consumer.assign(&topic_partitions)?;
 
-        Ok(consumer)
+        Ok((consumer, None))
     }
 
     async fn run_int(
@@ -208,17 +258,34 @@ impl KafkaSourceFunc {
         ctx: &mut SourceContext,
         collector: &mut SourceCollector,
     ) -> DataflowResult<SourceFinishType> {
-        let consumer = self
+        let (consumer, rebalance_info) = self
             .get_consumer(ctx)
             .await
             .context("creating kafka consumer")?;
+
+        // Extract rebalance channel and saved state for pattern mode
+        let (mut rebalance_rx, saved_state) = match rebalance_info {
+            Some((rx, state)) => (Some(rx), state),
+            None => (None, HashMap::new()),
+        };
 
         let rate_limiter = GovernorRateLimiter::direct(Quota::per_second(self.messages_per_second));
         // Track offsets by (topic, partition) to support multi-topic subscriptions
         let mut offsets: HashMap<(String, i32), i64> = HashMap::new();
 
-        // For pattern subscriptions, we skip the initial assignment check since
-        // Kafka handles partition assignment dynamically via the consumer group protocol
+        // Warn about pattern subscription with parallelism > 1
+        // GlobalKeyedState stores all state in every subtask, so rebalance offset restoration
+        // works correctly. However, this means each subtask holds a full copy of all offsets,
+        // which is wasteful for high partition counts.
+        if self.topic_pattern.is_some() && ctx.task_info.parallelism > 1 {
+            warn!(
+                "topic_pattern with parallelism {} - each subtask will maintain a full copy of \
+                 all partition offsets via GlobalKeyedState. Consider parallelism=1 for pattern subscriptions.",
+                ctx.task_info.parallelism
+            );
+        }
+
+        // For single-topic, check if we have no partitions assigned (more subtasks than partitions)
         if self.topic_pattern.is_none() && consumer.assignment().unwrap().count() == 0 {
             warn!(
                 "Kafka Consumer {}-{} is subscribed to no partitions, as there are more subtasks than partitions... setting idle",
@@ -227,6 +294,21 @@ impl KafkaSourceFunc {
             collector
                 .broadcast(SignalMessage::Watermark(Watermark::Idle))
                 .await;
+        }
+
+        // For pattern subscriptions, check initial assignment after a brief delay
+        if self.topic_pattern.is_some() {
+            // Give Kafka time to perform initial partition assignment
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if consumer.assignment().map(|a| a.count()).unwrap_or(0) == 0 {
+                warn!(
+                    "No partitions assigned for pattern subscription after 5s, setting idle. \
+                     Will become active when matching topics appear.",
+                );
+                collector
+                    .broadcast(SignalMessage::Watermark(Watermark::Idle))
+                    .await;
+            }
         }
 
         if let Some(schema_resolver) = &self.schema_resolver {
@@ -298,6 +380,51 @@ impl KafkaSourceFunc {
                         collector.flush_buffer().await?;
                     }
                 }
+                result = async {
+                    match rebalance_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(event) = result {
+                        match event {
+                            RebalanceEvent::Assign(partitions) => {
+                                info!("Rebalance assign: {} partitions", partitions.len());
+                                for (topic, partition) in &partitions {
+                                    let key = format!("{topic}:{partition}");
+                                    if let Some(state) = saved_state.get(&key) {
+                                        info!(
+                                            "Seeking {topic}:{partition} to offset {}",
+                                            state.offset
+                                        );
+                                        if let Err(e) = consumer.seek(
+                                            topic,
+                                            *partition,
+                                            Offset::Offset(state.offset),
+                                            Duration::from_secs(5),
+                                        ) {
+                                            warn!(
+                                                "Failed to seek {}:{} to offset {}: {}",
+                                                topic, partition, state.offset, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            RebalanceEvent::Revoke(partitions) => {
+                                info!("Rebalance revoke: {} partitions", partitions.len());
+                                if consumer.assignment().map(|a| a.count()).unwrap_or(0) == 0 {
+                                    warn!(
+                                        "All partitions revoked for pattern subscription, setting idle"
+                                    );
+                                    collector
+                                        .broadcast(SignalMessage::Watermark(Watermark::Idle))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
                 control_message = ctx.control_rx.recv() => {
                     match control_message {
                         Some(ControlMessage::Checkpoint(c)) => {
@@ -306,10 +433,7 @@ impl KafkaSourceFunc {
                             let s = ctx.table_manager.get_global_keyed_state("k").await?;
                             for ((topic, partition), offset) in &offsets {
                                 s.insert(
-                                    KafkaStateKey {
-                                        topic: topic.clone(),
-                                        partition: *partition,
-                                    },
+                                    format!("{topic}:{partition}"),
                                     KafkaState {
                                         topic: topic.clone(),
                                         partition: *partition,
@@ -373,6 +497,6 @@ impl SourceOperator for KafkaSourceFunc {
     }
 
     fn tables(&self) -> HashMap<String, TableConfig> {
-        arroyo_state::global_table_config("k", "kafka offsets")
+        arroyo_state::global_table_config_with_version("k", "kafka offsets", 1)
     }
 }

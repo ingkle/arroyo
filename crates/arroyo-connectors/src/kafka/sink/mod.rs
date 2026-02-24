@@ -163,8 +163,13 @@ impl KafkaSinkFunc {
                 ..
             } => {
                 client_config.set("enable.idempotence", "true");
-                // For dynamic topic routing, use "dynamic" as the topic identifier
-                let topic_id = self.topic.clone().unwrap_or_else(|| "dynamic".to_string());
+                // For dynamic topic routing, include topic_field name for clarity
+                let topic_id = self.topic.clone().unwrap_or_else(|| {
+                    format!(
+                        "dynamic:{}",
+                        self.topic_field.as_deref().unwrap_or("unknown")
+                    )
+                });
                 let transactional_id = format!(
                     "arroyo-id-{}-{}-{}-{}-{}",
                     task_info.job_id,
@@ -256,7 +261,7 @@ impl ArrowOperator for KafkaSinkFunc {
             .topic
             .clone()
             .unwrap_or_else(|| format!("dynamic:{}", self.topic_field.as_deref().unwrap_or("?")));
-        format!("kafka-producer-{}", topic_desc)
+        format!("kafka-producer-{topic_desc}")
     }
 
     fn display(&self) -> DisplayableOperator<'_> {
@@ -337,7 +342,7 @@ impl ArrowOperator for KafkaSinkFunc {
 
         for (i, v) in values.enumerate() {
             // Determine target topic: use topic_field value if available, otherwise use default
-            let target_topic = topics
+            let target_topic = match topics
                 .and_then(|t| {
                     if t.is_null(i) {
                         None
@@ -346,7 +351,20 @@ impl ArrowOperator for KafkaSinkFunc {
                     }
                 })
                 .or_else(|| default_topic.clone())
-                .expect("Either 'topic' or 'topic_field' must be specified for Kafka sink");
+            {
+                Some(topic) => topic,
+                None => {
+                    ctx.error_reporter
+                        .report_error(
+                            "Null topic in Kafka sink",
+                            format!(
+                                "Row {i} has null topic_field value and no default topic is set, skipping record",
+                            ),
+                        )
+                        .await;
+                    continue;
+                }
+            };
 
             // kafka timestamp as unix millis
             let timestamp = timestamps.map(|ts| {

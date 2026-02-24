@@ -28,6 +28,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Receiver;
@@ -68,7 +69,7 @@ impl KafkaTable {
                 let topic = self
                     .topic
                     .as_ref()
-                    .map(|t| format!("{}-value", t))
+                    .map(|t| format!("{t}-value"))
                     .unwrap_or_else(|| "unknown-value".to_string());
                 Cow::Owned(topic)
             }
@@ -81,7 +82,7 @@ impl KafkaTable {
         self.topic.clone().unwrap_or_else(|| {
             self.topic_pattern
                 .clone()
-                .map(|p| format!("pattern:{}", p))
+                .map(|p| format!("pattern:{p}"))
                 .unwrap_or_else(|| "unknown".to_string())
         })
     }
@@ -1042,18 +1043,69 @@ type BaseConsumer = rdkafka::consumer::BaseConsumer<Context>;
 type FutureProducer = rdkafka::producer::FutureProducer<Context>;
 type StreamConsumer = rdkafka::consumer::StreamConsumer<Context>;
 
+/// Events sent from rdkafka's rebalance callback to the source operator
+#[derive(Debug)]
+pub enum RebalanceEvent {
+    /// Partitions assigned to this consumer
+    Assign(Vec<(String, i32)>),
+    /// Partitions revoked from this consumer
+    Revoke(Vec<(String, i32)>),
+}
+
 #[derive(Clone)]
 pub struct Context {
     config: Option<KafkaConfig>,
+    rebalance_tx: Option<Arc<tokio_mpsc::UnboundedSender<RebalanceEvent>>>,
 }
 
 impl Context {
     pub fn new(config: Option<KafkaConfig>) -> Self {
-        Self { config }
+        Self {
+            config,
+            rebalance_tx: None,
+        }
+    }
+
+    /// Create a context with a rebalance event channel for pattern subscriptions
+    pub fn with_rebalance_tx(mut self, tx: tokio_mpsc::UnboundedSender<RebalanceEvent>) -> Self {
+        self.rebalance_tx = Some(Arc::new(tx));
+        self
     }
 }
 
-impl ConsumerContext for Context {}
+impl ConsumerContext for Context {
+    fn post_rebalance(
+        &self,
+        _base_consumer: &rdkafka::consumer::BaseConsumer<Self>,
+        rebalance: &rdkafka::consumer::Rebalance<'_>,
+    ) {
+        if let Some(tx) = &self.rebalance_tx {
+            match rebalance {
+                rdkafka::consumer::Rebalance::Assign(tpl) => {
+                    let partitions: Vec<_> = tpl
+                        .elements()
+                        .iter()
+                        .map(|e| (e.topic().to_string(), e.partition()))
+                        .collect();
+                    info!("Rebalance: assigned {} partitions", partitions.len());
+                    let _ = tx.send(RebalanceEvent::Assign(partitions));
+                }
+                rdkafka::consumer::Rebalance::Revoke(tpl) => {
+                    let partitions: Vec<_> = tpl
+                        .elements()
+                        .iter()
+                        .map(|e| (e.topic().to_string(), e.partition()))
+                        .collect();
+                    info!("Rebalance: revoked {} partitions", partitions.len());
+                    let _ = tx.send(RebalanceEvent::Revoke(partitions));
+                }
+                rdkafka::consumer::Rebalance::Error(e) => {
+                    error!("Rebalance error: {}", e);
+                }
+            }
+        }
+    }
+}
 
 impl ProducerContext for Context {
     type DeliveryOpaque = ();

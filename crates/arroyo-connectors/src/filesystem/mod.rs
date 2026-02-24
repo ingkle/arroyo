@@ -216,7 +216,7 @@ impl Connector for FileSystemConnector {
             }) => {
                 BackendConfig::parse_url(path, true)?;
 
-                let description = format!("FileSystemSink{:?}<{format}, {path}>", version);
+                let description = format!("FileSystemSink{version:?}<{format}, {path}>");
 
                 let exprs = partitioning
                     .partition_expr(&schema.arroyo_schema().schema)?

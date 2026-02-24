@@ -177,8 +177,7 @@ impl<BBW: BatchBufferingWriter + 'static> Debug for OpenFileState<BBW> {
             } => {
                 write!(
                     f,
-                    "OpenFileState::ClosingMulti ( parts: {:?}, multipart_id: {:?} )",
-                    parts, multipart_id
+                    "OpenFileState::ClosingMulti ( parts: {parts:?}, multipart_id: {multipart_id:?} )",
                 )
             }
             OpenFileState::ClosingSingle { bytes, .. } => {
