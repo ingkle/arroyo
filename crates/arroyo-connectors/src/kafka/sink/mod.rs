@@ -32,7 +32,9 @@ use super::{Context, FutureProducer, SinkCommitMode};
 mod test;
 
 pub struct KafkaSinkFunc {
-    pub topic: String,
+    pub topic: Option<String>,
+    pub topic_field: Option<String>,
+    pub topic_col: Option<usize>,
     pub bootstrap_servers: String,
     pub consistency_mode: ConsistencyMode,
     pub timestamp_field: Option<String>,
@@ -124,6 +126,27 @@ impl KafkaSinkFunc {
         }
     }
 
+    fn set_topic_col(&mut self, schema: &ArroyoSchema) {
+        if let Some(f) = &self.topic_field {
+            if let Ok(f) = schema.schema.field_with_name(f) {
+                if matches!(f.data_type(), DataType::Utf8) {
+                    self.topic_col = Some(schema.schema.index_of(f.name()).unwrap());
+                } else {
+                    warn!(
+                        "Kafka sink configured with topic_field '{f}', but it has type \
+                {}, not TEXT... ignoring",
+                        f.data_type()
+                    );
+                }
+            } else {
+                warn!(
+                    "Kafka sink configured with topic_field '{f}', but that \
+                does not appear in the schema... ignoring"
+                );
+            }
+        }
+    }
+
     fn init_producer(&mut self, task_info: &TaskInfo) -> Result<()> {
         let mut client_config = ClientConfig::new();
         client_config.set("bootstrap.servers", &self.bootstrap_servers);
@@ -140,11 +163,18 @@ impl KafkaSinkFunc {
                 ..
             } => {
                 client_config.set("enable.idempotence", "true");
+                // For dynamic topic routing, include topic_field name for clarity
+                let topic_id = self.topic.clone().unwrap_or_else(|| {
+                    format!(
+                        "dynamic:{}",
+                        self.topic_field.as_deref().unwrap_or("unknown")
+                    )
+                });
                 let transactional_id = format!(
                     "arroyo-id-{}-{}-{}-{}-{}",
                     task_info.job_id,
                     task_info.operator_id,
-                    self.topic,
+                    topic_id,
                     task_info.task_index,
                     next_transaction_index
                 );
@@ -182,13 +212,14 @@ impl KafkaSinkFunc {
 
     async fn publish(
         &mut self,
+        topic: &str,
         ts: Option<i64>,
         k: Option<Vec<u8>>,
         v: Vec<u8>,
         ctx: &mut OperatorContext,
     ) {
         let mut rec = {
-            let mut rec = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.topic);
+            let mut rec = FutureRecord::<Vec<u8>, Vec<u8>>::to(topic);
             if let Some(ts) = ts {
                 rec = rec.timestamp(ts);
             }
@@ -226,14 +257,19 @@ impl KafkaSinkFunc {
 #[async_trait]
 impl ArrowOperator for KafkaSinkFunc {
     fn name(&self) -> String {
-        format!("kafka-producer-{}", self.topic)
+        let topic_desc = self
+            .topic
+            .clone()
+            .unwrap_or_else(|| format!("dynamic:{}", self.topic_field.as_deref().unwrap_or("?")));
+        format!("kafka-producer-{topic_desc}")
     }
 
     fn display(&self) -> DisplayableOperator<'_> {
         DisplayableOperator {
             name: Cow::Borrowed("KafkaSinkFunc"),
             fields: vec![
-                ("topic", self.topic.as_str().into()),
+                ("topic", AsDisplayable::Debug(&self.topic)),
+                ("topic_field", AsDisplayable::Debug(&self.topic_field)),
                 ("bootstrap_servers", self.bootstrap_servers.as_str().into()),
                 (
                     "consistency_mode",
@@ -276,6 +312,7 @@ impl ArrowOperator for KafkaSinkFunc {
     async fn on_start(&mut self, ctx: &mut OperatorContext) -> DataflowResult<()> {
         self.set_timestamp_col(&ctx.in_schemas[0]);
         self.set_key_col(&ctx.in_schemas[0]);
+        self.set_topic_col(&ctx.in_schemas[0]);
 
         self.init_producer(&ctx.task_info)
             .expect("Producer creation failed");
@@ -298,8 +335,37 @@ impl ArrowOperator for KafkaSinkFunc {
             .downcast_ref::<arrow::array::TimestampNanosecondArray>();
 
         let keys = self.key_col.map(|i| batch.column(i).as_string::<i32>());
+        let topics = self.topic_col.map(|i| batch.column(i).as_string::<i32>());
+
+        // Get default topic (required if topic_field is not set)
+        let default_topic = self.topic.clone();
 
         for (i, v) in values.enumerate() {
+            // Determine target topic: use topic_field value if available, otherwise use default
+            let target_topic = match topics
+                .and_then(|t| {
+                    if t.is_null(i) {
+                        None
+                    } else {
+                        Some(t.value(i).to_string())
+                    }
+                })
+                .or_else(|| default_topic.clone())
+            {
+                Some(topic) => topic,
+                None => {
+                    ctx.error_reporter
+                        .report_error(
+                            "Null topic in Kafka sink",
+                            format!(
+                                "Row {i} has null topic_field value and no default topic is set, skipping record",
+                            ),
+                        )
+                        .await;
+                    continue;
+                }
+            };
+
             // kafka timestamp as unix millis
             let timestamp = timestamps.map(|ts| {
                 if ts.is_null(i) {
@@ -310,7 +376,7 @@ impl ArrowOperator for KafkaSinkFunc {
             });
             // TODO: this copy should be unnecessary but likely needs a custom trait impl
             let key = keys.map(|k| k.value(i).as_bytes().to_vec());
-            self.publish(timestamp, key, v, ctx).await;
+            self.publish(&target_topic, timestamp, key, v, ctx).await;
         }
         Ok(())
     }

@@ -111,14 +111,32 @@ fn create_add_action(file: &FinishedFile) -> Action {
 
     let subpath = file.filename.trim_start_matches('/');
 
+    // Parse Hive-style partition values from path segments (e.g., "event_date=2026-02-13/file.parquet")
+    let partition_values = parse_hive_partition_values(subpath);
+
     Action::Add(Add {
         path: subpath.to_string(),
         size: file.size as i64,
-        partition_values: HashMap::new(),
+        partition_values,
         modification_time: to_millis(SystemTime::now()) as i64,
         data_change: true,
         ..Default::default()
     })
+}
+
+/// Extract partition key=value pairs from Hive-style path segments.
+/// e.g., "year=2026/month=02/file.parquet" → {"year": Some("2026"), "month": Some("02")}
+fn parse_hive_partition_values(path: &str) -> HashMap<String, Option<String>> {
+    let mut values = HashMap::new();
+    for segment in path.split('/') {
+        if let Some((key, value)) = segment.split_once('=') {
+            // Skip the final filename segment (contains dots for file extension)
+            if !key.is_empty() && !value.contains('.') {
+                values.insert(key.to_string(), Some(value.to_string()));
+            }
+        }
+    }
+    values
 }
 
 async fn check_existing_files(

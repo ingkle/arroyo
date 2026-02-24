@@ -5,8 +5,13 @@
         "topic": {
             "title": "Topic",
             "type": "string",
-            "description": "The Kafka topic to use for this table",
+            "description": "The Kafka topic to use for this table. Either 'topic' or 'topic_pattern' must be set, but not both.",
             "format": "autocomplete"
+        },
+        "topic_pattern": {
+            "title": "Topic Pattern",
+            "type": "string",
+            "description": "A regex pattern to subscribe to multiple topics (e.g., '^logs-.*' or '^edge[0-9]+_raw$'). Uses Kafka's pattern subscription with automatic rebalancing. Either 'topic' or 'topic_pattern' must be set, but not both. Only valid for source tables."
         },
         "type": {
             "title": "Table Type",
@@ -70,6 +75,11 @@
                             "type": "string",
                             "title": "timestamp field",
                             "description": "Field to use to set the timestamp of the message written to Kafka; defaults to the event time"
+                        },
+                        "topic_field": {
+                            "type": "string",
+                            "title": "topic field",
+                            "description": "Field to use to dynamically route messages to different topics. Each message will be sent to the topic specified in this field. Either 'topic' or 'topic_field' must be set."
                         }
                     },
                     "additionalProperties": false,
@@ -94,7 +104,6 @@
         }
     },
     "required": [
-        "topic",
         "type"
     ]
 }
