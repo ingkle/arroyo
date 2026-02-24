@@ -73,7 +73,9 @@ impl KafkaTopicTester {
 
     async fn get_sink_with_writes(&self) -> KafkaSinkWithWrites {
         let mut kafka = KafkaSinkFunc {
-            topic: self.topic.to_string(),
+            topic: Some(self.topic.to_string()),
+            topic_field: None,
+            topic_col: None,
             bootstrap_servers: self.server.to_string(),
             producer: None,
             consistency_mode: ConsistencyMode::AtLeastOnce,
