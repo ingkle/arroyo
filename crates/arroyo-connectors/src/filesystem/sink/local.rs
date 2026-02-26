@@ -376,6 +376,9 @@ impl<V: LocalWriter + Send + 'static> TwoPhaseCommitter for LocalFileSystemWrite
                     *last_version = version;
                 }
             }
+            CommitState::DeltaLakeMulti { .. } => {
+                unreachable!("DeltaLakeMulti is not supported for local filesystems");
+            }
             CommitState::Iceberg(_) => {
                 unreachable!("Iceberg is not supported for local filesystems");
             }

@@ -69,6 +69,7 @@ pub fn make_sink(
     table_format: TableFormat,
     partitioner: PartitionerMode,
     connection_id: Option<String>,
+    table_column: Option<String>,
 ) -> Result<ConstructedOperator> {
     let is_local = match table_format {
         TableFormat::None | TableFormat::Delta => {
@@ -85,6 +86,10 @@ pub fn make_sink(
     };
 
     let format = config.format.expect("must have format for FileSystemSink");
+
+    if table_column.is_some() && (is_local || sink.version == SinkVersion::V1) {
+        bail!("table_column requires sink.version = 'v2' and non-local storage");
+    }
 
     match (&format, is_local, sink.version) {
         (Format::Parquet { .. }, true, _) => Ok(ConstructedOperator::from_operator(Box::new(
@@ -106,6 +111,7 @@ pub fn make_sink(
                 format,
                 partitioner,
                 connection_id,
+                table_column,
             )),
         )),
         (Format::Json { .. }, true, _) => Ok(ConstructedOperator::from_operator(Box::new(
@@ -127,6 +133,7 @@ pub fn make_sink(
                 format,
                 partitioner,
                 connection_id,
+                table_column,
             )),
         )),
         (f, _, _) => bail!("unsupported format {f}"),
@@ -289,6 +296,7 @@ impl Connector for FileSystemConnector {
                     config,
                     TableFormat::None,
                     PartitionerMode::FileConfig(partitioning),
+                    None,
                     None,
                 )
             }

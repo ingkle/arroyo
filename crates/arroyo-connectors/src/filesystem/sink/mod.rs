@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use ::arrow::datatypes::Schema;
 use deltalake::DeltaTable;
 use futures::{Future, stream::FuturesUnordered};
 use futures::{TryStreamExt, stream::StreamExt};
@@ -414,10 +415,22 @@ struct AsyncMultipartFileSystemWriter<BBW: BatchBufferingWriter> {
 }
 
 #[derive(Debug)]
+pub struct DeltaTableEntry {
+    pub table: DeltaTable,
+    pub last_version: i64,
+}
+
+#[derive(Debug)]
 pub enum CommitState {
     DeltaLake {
         last_version: i64,
         table: Box<DeltaTable>,
+    },
+    DeltaLakeMulti {
+        tables: HashMap<String, DeltaTableEntry>,
+        base_path: String,
+        storage_options: HashMap<String, String>,
+        schema: Schema,
     },
     Iceberg(Box<IcebergTable>),
     VanillaParquet,
@@ -427,6 +440,7 @@ impl CommitState {
     fn name(&self) -> &'static str {
         match self {
             CommitState::DeltaLake { .. } => "delta",
+            CommitState::DeltaLakeMulti { .. } => "delta_multi",
             CommitState::Iceberg(_) => "iceberg",
             CommitState::VanillaParquet => "none",
         }
@@ -995,6 +1009,9 @@ where
                     *last_version = new_version;
                 }
             }
+            CommitState::DeltaLakeMulti { .. } => {
+                unreachable!("DeltaLakeMulti is only supported in V2 sink");
+            }
             CommitState::Iceberg(table) => {
                 table.commit(epoch, &finished_files).await?;
             }
@@ -1019,6 +1036,7 @@ where
     fn delta_version(&mut self) -> i64 {
         match &self.commit_state {
             CommitState::DeltaLake { last_version, .. } => *last_version,
+            CommitState::DeltaLakeMulti { .. } => -1,
             CommitState::VanillaParquet => 0,
             CommitState::Iceberg { .. } => 0,
         }

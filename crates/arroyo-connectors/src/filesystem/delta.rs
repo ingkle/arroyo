@@ -148,6 +148,7 @@ impl Connector for DeltaLakeConnector {
         match table.table_type {
             DeltaLakeTableType::Sink(sink) => {
                 let partitioning = sink.partitioning.clone();
+                let table_column = sink.table_column.clone();
                 make_sink(
                     FileSystemSink {
                         path: sink.path,
@@ -162,6 +163,7 @@ impl Connector for DeltaLakeConnector {
                     TableFormat::Delta {},
                     PartitionerMode::FileConfig(partitioning),
                     None,
+                    table_column,
                 )
             }
         }

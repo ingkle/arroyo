@@ -308,6 +308,7 @@ impl Connector for IcebergConnector {
                     TableFormat::Iceberg(Box::new(tf)),
                     PartitionerMode::Iceberg(sink.partitioning),
                     None,
+                    None,
                 )
             }
         }
