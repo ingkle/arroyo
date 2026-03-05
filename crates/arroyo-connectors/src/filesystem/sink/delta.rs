@@ -26,6 +26,22 @@ use std::{
 use tracing::debug;
 use url::Url;
 
+/// Parse partition values from hive-style paths within the filename.
+/// For example, if the path contains "/year=2024/month=01/", this will
+/// extract {"year": "2024", "month": "01"}.
+#[allow(dead_code)]
+pub fn parse_hive_partition_values(path: &str) -> HashMap<String, Option<String>> {
+    let mut partition_values = HashMap::new();
+    for segment in path.split('/') {
+        if let Some((key, value)) = segment.split_once('=') {
+            if !key.is_empty() {
+                partition_values.insert(key.to_string(), Some(value.to_string()));
+            }
+        }
+    }
+    partition_values
+}
+
 pub(crate) async fn commit_files_to_delta(
     finished_files: &[FinishedFile],
     table: &mut DeltaTable,
@@ -122,21 +138,6 @@ fn create_add_action(file: &FinishedFile) -> Action {
         data_change: true,
         ..Default::default()
     })
-}
-
-/// Extract partition key=value pairs from Hive-style path segments.
-/// e.g., "year=2026/month=02/file.parquet" → {"year": Some("2026"), "month": Some("02")}
-fn parse_hive_partition_values(path: &str) -> HashMap<String, Option<String>> {
-    let mut values = HashMap::new();
-    for segment in path.split('/') {
-        if let Some((key, value)) = segment.split_once('=') {
-            // Skip the final filename segment (contains dots for file extension)
-            if !key.is_empty() && !value.contains('.') {
-                values.insert(key.to_string(), Some(value.to_string()));
-            }
-        }
-    }
-    values
 }
 
 async fn check_existing_files(

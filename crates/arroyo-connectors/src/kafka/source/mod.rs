@@ -228,8 +228,6 @@ impl KafkaSourceFunc {
                         .map(|s| Offset::Offset(s.offset))
                         .unwrap_or_else(|| {
                             if has_state {
-                                // if we've restored partitions and we don't know about this one, that means it's
-                                // new, and we want to start from the beginning so we don't drop data
                                 Offset::Beginning
                             } else {
                                 self.offset_mode.get_offset()
@@ -274,9 +272,6 @@ impl KafkaSourceFunc {
         let mut offsets: HashMap<(String, i32), i64> = HashMap::new();
 
         // Warn about pattern subscription with parallelism > 1
-        // GlobalKeyedState stores all state in every subtask, so rebalance offset restoration
-        // works correctly. However, this means each subtask holds a full copy of all offsets,
-        // which is wasteful for high partition counts.
         if self.topic_pattern.is_some() && ctx.task_info.parallelism > 1 {
             warn!(
                 "topic_pattern with parallelism {} - each subtask will maintain a full copy of \
@@ -298,7 +293,6 @@ impl KafkaSourceFunc {
 
         // For pattern subscriptions, check initial assignment after a brief delay
         if self.topic_pattern.is_some() {
-            // Give Kafka time to perform initial partition assignment
             tokio::time::sleep(Duration::from_secs(5)).await;
             if consumer.assignment().map(|a| a.count()).unwrap_or(0) == 0 {
                 warn!(

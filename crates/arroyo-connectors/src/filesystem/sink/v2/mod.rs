@@ -16,8 +16,7 @@ use crate::filesystem::TableFormat;
 use crate::filesystem::config::{self, FilenameStrategy, NamingConfig};
 use crate::filesystem::sink::two_phase_committer::CommitStrategy;
 use crate::filesystem::sink::v2::open_file::{CommitPreparation, OpenFile, PendingSingleFile};
-use arrow::array::{Array, StringArray, UInt32Array};
-use arrow::compute::take;
+use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 use arrow::row::OwnedRow;
 use arroyo_operator::context::{Collector, OperatorContext};
@@ -48,13 +47,10 @@ use uuid::Uuid;
 
 const DEFAULT_TARGET_PART_SIZE: usize = 32 * 1024 * 1024;
 
-/// (table_prefix, hive_partition) — table_prefix is Some only in multi-table mode
-pub type TablePartitionKey = (Option<String>, Option<OwnedRow>);
-
 pub struct ActiveState<BBW: BatchBufferingWriter + 'static> {
     max_file_index: usize,
-    // (table_prefix, partition) -> filename
-    active_partitions: HashMap<TablePartitionKey, Arc<Path>>,
+    // partition -> filename
+    active_partitions: HashMap<Option<OwnedRow>, Arc<Path>>,
     // filename -> file writer
     open_files: HashMap<Arc<Path>, OpenFile<BBW>>,
     // single files pending local commit (PerSubtask strategy)
@@ -69,6 +65,7 @@ pub struct SinkConfig {
     rolling_policies: Vec<RollingPolicy>,
     // consumed on start
     table_format: Option<TableFormat>,
+    table_column: Option<String>,
 }
 
 impl SinkConfig {
@@ -95,6 +92,7 @@ pub struct SinkContext {
     iceberg_schema: Option<iceberg::spec::SchemaRef>,
     task_info: Arc<TaskInfo>,
     commit_state: CommitState,
+    table_column_index: Option<usize>,
 }
 
 /// test utility to precisely cause failures
@@ -117,7 +115,6 @@ impl SinkContext {
         config: &mut SinkConfig,
         schema: ArroyoSchemaRef,
         task_info: Arc<TaskInfo>,
-        table_column: Option<&str>,
     ) -> DataflowResult<Self> {
         let mut table_format = config
             .table_format
@@ -134,41 +131,52 @@ impl SinkContext {
 
         let mut iceberg_schema = None;
 
-        let commit_state = match table_format {
-            TableFormat::Delta => {
-                if table_column.is_some() {
-                    CommitState::DeltaLakeMulti {
-                        tables: HashMap::new(),
-                        base_path: config.config.path.clone(),
-                        storage_options: config.config.storage_options.clone(),
-                        schema: schema.schema_without_timestamp(),
-                    }
-                } else {
-                    CommitState::DeltaLake {
-                        last_version: -1,
-                        table: Box::new(
-                            load_or_create_table(&provider, &schema.schema_without_timestamp())
-                                .await
-                                .map_err(|e| {
-                                    connector_err!(
-                                        User,
-                                        NoRetry,
-                                        source: e,
-                                        "failed to load or create delta table"
-                                    )
-                                })?,
-                        ),
-                    }
-                }
+        let table_column_index = config.table_column.as_ref().map(|col_name| {
+            schema
+                .schema
+                .index_of(col_name)
+                .unwrap_or_else(|_| panic!("table_column '{col_name}' not found in schema"))
+        });
+
+        let has_table_column = config.table_column.is_some();
+        let commit_state = match (table_format, has_table_column) {
+            (TableFormat::Delta, true) => CommitState::DeltaLakeMulti {
+                tables: HashMap::new(),
+                base_path: config.config.path.trim_end_matches('/').to_string(),
+                storage_options: config.config.storage_options.clone(),
+                schema: schema.schema_without_timestamp(),
+            },
+            (TableFormat::Iceberg(_), true) => {
+                return Err(connector_err!(
+                    User,
+                    NoRetry,
+                    "table_column is not supported for Iceberg sinks. \
+                     Iceberg requires a fixed table location."
+                ));
             }
-            TableFormat::Iceberg(mut table) => {
+            (TableFormat::Delta, false) => CommitState::DeltaLake {
+                last_version: -1,
+                table: Box::new(
+                    load_or_create_table(&provider, &schema.schema_without_timestamp())
+                        .await
+                        .map_err(|e| {
+                            connector_err!(
+                                User,
+                                NoRetry,
+                                source: e,
+                                "failed to load or create delta table"
+                            )
+                        })?,
+                ),
+            },
+            (TableFormat::Iceberg(mut table), false) => {
                 let t = table
                     .load_or_create(task_info.clone(), &schema.schema)
                     .await?;
                 iceberg_schema = Some(t.metadata().current_schema().clone());
                 CommitState::Iceberg(table)
             }
-            TableFormat::None => CommitState::VanillaParquet,
+            (TableFormat::None, _) => CommitState::VanillaParquet,
         };
 
         Ok(SinkContext {
@@ -181,6 +189,7 @@ impl SinkContext {
             iceberg_schema,
             task_info: task_info.clone(),
             commit_state,
+            table_column_index,
         })
     }
 }
@@ -220,8 +229,9 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
             filename = format!("{hive}/{filename}");
         }
 
-        if let Some(prefix) = table_prefix {
-            filename = format!("{prefix}/{filename}");
+        // For multi-table routing, prepend the table name as a subdirectory
+        if let Some(table) = table_prefix {
+            filename = format!("{table}/{filename}");
         }
 
         filename
@@ -232,16 +242,17 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
         config: &SinkConfig,
         logger: FsEventLogger,
         context: &SinkContext,
-        key: &TablePartitionKey,
+        partition: &Option<OwnedRow>,
         representative_ts: SystemTime,
+        table_prefix: Option<&str>,
     ) -> &mut OpenFile<BBW> {
         let file = self
             .active_partitions
-            .get(key)
+            .get(partition)
             .and_then(|f| self.open_files.get(f));
 
         if file.is_none() || !file.unwrap().is_writable() {
-            let file_path = self.next_file_path(config, context, &key.1, key.0.as_deref());
+            let file_path = self.next_file_path(config, context, partition, table_prefix);
             let path = Arc::new(Path::from(file_path));
 
             let batch_writer = BBW::new(
@@ -262,13 +273,13 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
             );
 
             self.active_partitions
-                .insert(key.clone(), path.clone());
+                .insert(partition.clone(), path.clone());
             self.open_files.insert(path, open_file);
 
             self.max_file_index += 1;
         }
 
-        let file_path = self.active_partitions.get(key).unwrap();
+        let file_path = self.active_partitions.get(partition).unwrap();
         self.open_files.get_mut(file_path).unwrap()
     }
 }
@@ -284,8 +295,6 @@ pub struct FileSystemSinkV2<BBW: BatchBufferingWriter + 'static> {
 
     event_logger: FsEventLogger,
     watermark: Option<SystemTime>,
-    table_column: Option<String>,
-    table_column_index: Option<usize>,
 }
 
 struct UploadState {
@@ -325,10 +334,12 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
     ) -> Self {
         let mut file_naming = config.file_naming.clone();
         if file_naming.suffix.is_none() {
-            file_naming.suffix = Some(BBW::suffix());
+            file_naming.suffix = Some(BBW::suffix_for_format(&format).to_owned());
         }
 
         let connection_id_str = connection_id.clone().unwrap_or_default();
+        let output_format = format.name();
+        let table_format_name = table_format.name();
 
         Self {
             config: SinkConfig {
@@ -338,6 +349,7 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
                 table_format: Some(table_format),
                 file_naming,
                 partitioner_mode,
+                table_column,
             },
             context: None,
             active: ActiveState {
@@ -353,10 +365,10 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
             event_logger: FsEventLogger {
                 task_info: None,
                 connection_id: connection_id_str.into(),
+                output_format,
+                table_format: table_format_name,
             },
             watermark: None,
-            table_column,
-            table_column_index: None,
         }
     }
 
@@ -411,8 +423,65 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
     fn delta_version(&self) -> i64 {
         match &self.context.as_ref().unwrap().commit_state {
             CommitState::DeltaLake { last_version, .. } => *last_version,
+            CommitState::DeltaLakeMulti { .. } => -1, // multi-table tracks versions per table
             _ => -1,
         }
+    }
+
+    async fn process_batch_inner(
+        &mut self,
+        batch: RecordBatch,
+        timestamp_index: usize,
+        table_prefix: Option<&str>,
+    ) -> DataflowResult<()> {
+        let partitioner = &self.context.as_ref().unwrap().partitioner;
+
+        let partitions: Vec<(Option<OwnedRow>, RecordBatch)> = if partitioner.is_partitioned() {
+            partitioner
+                .partition(&batch)?
+                .into_iter()
+                .map(|(k, b)| (Some(k), b))
+                .collect()
+        } else {
+            vec![(None, batch)]
+        };
+
+        for (partition_key, sub_batch) in partitions {
+            let representative_timestamp =
+                representitive_timestamp(sub_batch.column(timestamp_index)).map_err(|e| {
+                    connector_err!(
+                        Internal,
+                        NoRetry,
+                        source: e,
+                        "failed to get representative timestamp"
+                    )
+                })?;
+
+            let file = self.active.get_or_create_file(
+                &self.config,
+                self.event_logger.clone(),
+                self.context.as_ref().unwrap(),
+                &partition_key,
+                representative_timestamp,
+                table_prefix,
+            );
+            let future = file.add_batch(&sub_batch)?;
+
+            if let Some(future) = future {
+                let futures = self.upload.pending_uploads.lock().await;
+                futures.push(future);
+            }
+
+            if self
+                .upload
+                .roll_file_if_ready(&self.config.rolling_policies, self.watermark, file)
+                .await?
+            {
+                self.active.active_partitions.remove(&partition_key);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -451,35 +520,8 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
     async fn on_start(&mut self, ctx: &mut OperatorContext) -> DataflowResult<()> {
         let schema = ctx.in_schemas.first().unwrap().clone();
         self.event_logger.task_info = Some(ctx.task_info.clone());
-
-        // Resolve table_column index from schema
-        if let Some(ref col_name) = self.table_column {
-            match schema.schema.index_of(col_name) {
-                Ok(idx) => {
-                    self.table_column_index = Some(idx);
-                    info!(
-                        "Delta sink: dynamic table routing from column '{}' (index {})",
-                        col_name, idx
-                    );
-                }
-                Err(_) => {
-                    warn!(
-                        "Delta sink: table_column '{}' not found in schema, using single table mode",
-                        col_name
-                    );
-                }
-            }
-        }
-
-        self.context = Some(
-            SinkContext::new(
-                &mut self.config,
-                schema,
-                ctx.task_info.clone(),
-                self.table_column.as_deref(),
-            )
-            .await?,
-        );
+        self.context =
+            Some(SinkContext::new(&mut self.config, schema, ctx.task_info.clone()).await?);
 
         let state: HashMap<usize, FilesCheckpointV2> = ctx
             .table_manager
@@ -545,106 +587,54 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
         _collector: &mut dyn Collector,
     ) -> DataflowResult<()> {
         let timestamp_index = self.context.as_ref().unwrap().schema.timestamp_index;
-        let partitioner = &self.context.as_ref().unwrap().partitioner;
+        let table_column_index = self.context.as_ref().unwrap().table_column_index;
 
-        if let Some(col_idx) = self.table_column_index {
-            // Multi-table mode: split batch by table column value first
-            let groups = group_batch_by_string_column(&batch, col_idx)?;
+        // If table_column is configured, split by table name first
+        if let Some(table_col_idx) = table_column_index {
+            let table_col = batch.column(table_col_idx).as_string::<i32>();
 
-            for (table_value, sub_batch) in groups {
-                let partitions: Vec<(TablePartitionKey, RecordBatch)> =
-                    if partitioner.is_partitioned() {
-                        partitioner
-                            .partition(&sub_batch)?
-                            .into_iter()
-                            .map(|(k, b)| ((Some(table_value.clone()), Some(k)), b))
-                            .collect()
-                    } else {
-                        vec![((Some(table_value), None), sub_batch)]
-                    };
-
-                for (key, part_batch) in partitions {
-                    let representative_timestamp =
-                        representitive_timestamp(part_batch.column(timestamp_index)).map_err(
-                            |e| {
-                                connector_err!(
-                                    Internal,
-                                    NoRetry,
-                                    source: e,
-                                    "failed to get representative timestamp"
-                                )
-                            },
-                        )?;
-
-                    let file = self.active.get_or_create_file(
-                        &self.config,
-                        self.event_logger.clone(),
-                        self.context.as_ref().unwrap(),
-                        &key,
-                        representative_timestamp,
-                    );
-                    let future = file.add_batch(&part_batch)?;
-
-                    if let Some(future) = future {
-                        let futures = self.upload.pending_uploads.lock().await;
-                        futures.push(future);
-                    }
-
-                    if self
-                        .upload
-                        .roll_file_if_ready(&self.config.rolling_policies, self.watermark, file)
-                        .await?
-                    {
-                        self.active.active_partitions.remove(&key);
-                    }
-                }
-            }
-        } else {
-            // Single-table mode
-            let partitions: Vec<(TablePartitionKey, RecordBatch)> =
-                if partitioner.is_partitioned() {
-                    partitioner
-                        .partition(&batch)?
-                        .into_iter()
-                        .map(|(k, b)| ((None, Some(k)), b))
-                        .collect()
+            // Group rows by table name
+            let mut table_groups: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+            for i in 0..batch.num_rows() {
+                let table_name = if table_col.is_null(i) {
+                    None
                 } else {
-                    vec![((None, None), batch)]
+                    Some(table_col.value(i).to_string())
+                };
+                table_groups.entry(table_name).or_default().push(i);
+            }
+
+            for (table_name, indices) in table_groups {
+                let table_name = match table_name {
+                    Some(name) => name,
+                    None => {
+                        warn!(
+                            "Skipping {} rows with null table_column value",
+                            indices.len()
+                        );
+                        continue;
+                    }
                 };
 
-            for (key, sub_batch) in partitions {
-                let representative_timestamp =
-                    representitive_timestamp(sub_batch.column(timestamp_index)).map_err(|e| {
+                let indices_array =
+                    arrow::array::UInt32Array::from_iter_values(indices.iter().map(|&i| i as u32));
+                let sub_batch =
+                    arrow::compute::take_record_batch(&batch, &indices_array).map_err(|e| {
                         connector_err!(
                             Internal,
                             NoRetry,
-                            source: e,
-                            "failed to get representative timestamp"
+                            source: e.into(),
+                            "failed to take sub-batch for table '{}'",
+                            table_name
                         )
                     })?;
 
-                let file = self.active.get_or_create_file(
-                    &self.config,
-                    self.event_logger.clone(),
-                    self.context.as_ref().unwrap(),
-                    &key,
-                    representative_timestamp,
-                );
-                let future = file.add_batch(&sub_batch)?;
-
-                if let Some(future) = future {
-                    let futures = self.upload.pending_uploads.lock().await;
-                    futures.push(future);
-                }
-
-                if self
-                    .upload
-                    .roll_file_if_ready(&self.config.rolling_policies, self.watermark, file)
-                    .await?
-                {
-                    self.active.active_partitions.remove(&key);
-                }
+                self.process_batch_inner(sub_batch, timestamp_index, Some(&table_name))
+                    .await?;
             }
+        } else {
+            self.process_batch_inner(batch, timestamp_index, None)
+                .await?;
         }
 
         Ok(())
@@ -927,64 +917,88 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
                     storage_options,
                     schema,
                 } => {
-                    // Group finished files by table prefix
+                    // Group finished files by table name (first path component)
                     let mut table_files: HashMap<String, Vec<FinishedFile>> = HashMap::new();
-                    for file in &finished_files {
-                        let (table_name, relative_path) = split_table_prefix(&file.filename);
+                    for file in finished_files.iter() {
+                        let table_name = file
+                            .filename
+                            .split('/')
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string();
                         table_files
                             .entry(table_name)
                             .or_default()
                             .push(FinishedFile {
-                                filename: relative_path,
+                                // Strip the table_name prefix from the filename
+                                // so the path is relative to the table root
+                                filename: file
+                                    .filename
+                                    .strip_prefix(&format!(
+                                        "{}/",
+                                        file.filename.split('/').next().unwrap_or("")
+                                    ))
+                                    .unwrap_or(&file.filename)
+                                    .to_string(),
                                 partition: file.partition.clone(),
                                 size: file.size,
                                 metadata: file.metadata.clone(),
                             });
                     }
 
-                    // Commit to each table independently
-                    for (table_name, files) in table_files {
-                        if !tables.contains_key(&table_name) {
-                            // Lazy create DeltaTable for this sub-path
-                            let sub_path = format!("{}/{}", base_path, table_name);
-                            let provider = StorageProvider::for_url_with_options(
-                                &sub_path,
-                                storage_options.clone(),
-                            )
-                            .await
-                            .map_err(|e| {
-                                connector_err!(
-                                    User,
-                                    NoRetry,
-                                    "failed to create storage provider for table '{}': {:?}",
-                                    table_name,
-                                    e
+                    let mut commit_count = 0;
+                    for (table_name, files) in table_files.iter() {
+                        if files.is_empty() {
+                            continue;
+                        }
+
+                        // Get or create the DeltaTable entry for this table
+                        if !tables.contains_key(table_name) {
+                            let table_url =
+                                format!("{base_path}/{table_name}");
+                            let table_provider =
+                                StorageProvider::for_url_with_options(
+                                    &table_url,
+                                    storage_options.clone(),
                                 )
-                            })?;
-                            let dt = load_or_create_table(&provider, schema)
                                 .await
                                 .map_err(|e| {
-                                    connector_err!(
-                                        User,
-                                        NoRetry,
-                                        source: e,
-                                        "failed to load or create delta table for '{}'",
-                                        table_name
-                                    )
+                                    map_storage_error(e)
                                 })?;
-                            let version = dt.version().unwrap_or(-1);
+                            let delta_table =
+                                load_or_create_table(&table_provider, schema)
+                                    .await
+                                    .map_err(|e| {
+                                        connector_err!(
+                                            External,
+                                            WithBackoff,
+                                            source: e,
+                                            "failed to load or create delta table '{}'",
+                                            table_name
+                                        )
+                                    })?;
                             tables.insert(
                                 table_name.clone(),
                                 DeltaTableEntry {
-                                    table: dt,
-                                    last_version: version,
+                                    table_path: table_name.clone(),
+                                    last_version: -1,
+                                    table: Box::new(delta_table),
+                                    files: vec![],
                                 },
                             );
                         }
 
-                        let entry = tables.get_mut(&table_name).unwrap();
+                        let entry = tables.get_mut(table_name).unwrap();
+
+                        info!(
+                            "Committing {} files to Delta table '{}' at {}",
+                            files.len(),
+                            table_name,
+                            entry.table_path
+                        );
+
                         if let Some(new_version) = commit_files_to_delta(
-                            &files,
+                            files,
                             &mut entry.table,
                             entry.last_version,
                         )
@@ -1000,7 +1014,9 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
                         })? {
                             entry.last_version = new_version;
                         }
+                        commit_count += 1;
                     }
+                    info!("Committed to {} Delta tables", commit_count);
                 }
                 CommitState::Iceberg(table) => {
                     table.commit(epoch, &finished_files).await.map_err(
@@ -1040,10 +1056,10 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
         _collector: &mut dyn Collector,
     ) -> DataflowResult<()> {
         let mut to_remove = vec![];
-        for (key, path) in self.active.active_partitions.iter() {
+        for (partition, path) in self.active.active_partitions.iter() {
             let Some(of) = self.active.open_files.get_mut(path) else {
                 warn!(file = ?path, "file referenced in active_partitions is missing from open_files!");
-                to_remove.push(key.clone());
+                to_remove.push(partition.clone());
                 continue;
             };
 
@@ -1052,7 +1068,7 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
                 .roll_file_if_ready(&self.config.rolling_policies, self.watermark, of)
                 .await?
             {
-                to_remove.push(key.clone());
+                to_remove.push(partition.clone());
             }
         }
 
@@ -1061,394 +1077,5 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
         }
 
         Ok(())
-    }
-}
-
-fn group_batch_by_string_column(
-    batch: &RecordBatch,
-    col_idx: usize,
-) -> DataflowResult<HashMap<String, RecordBatch>> {
-    let col = batch
-        .column(col_idx)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            connector_err!(
-                User,
-                NoRetry,
-                "table_column must be a string column"
-            )
-        })?;
-
-    let mut indices: HashMap<String, Vec<u32>> = HashMap::new();
-    for i in 0..col.len() {
-        if col.is_valid(i) {
-            let val = col.value(i).to_string();
-            indices.entry(val).or_default().push(i as u32);
-        }
-    }
-
-    let schema = batch.schema();
-    indices
-        .into_iter()
-        .map(|(key, idx)| {
-            let idx_arr = UInt32Array::from(idx);
-            let columns: Vec<_> = batch
-                .columns()
-                .iter()
-                .map(|c| take(c, &idx_arr, None))
-                .collect::<Result<_, _>>()
-                .map_err(|e| {
-                    connector_err!(
-                        Internal,
-                        NoRetry,
-                        "failed to split batch by table column: {e}"
-                    )
-                })?;
-            Ok((
-                key,
-                RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
-                    connector_err!(Internal, NoRetry, "failed to create sub-batch: {e}")
-                })?,
-            ))
-        })
-        .collect()
-}
-
-fn split_table_prefix(filename: &str) -> (String, String) {
-    let clean = filename.trim_start_matches('/');
-    if let Some(pos) = clean.find('/') {
-        (clean[..pos].to_string(), clean[pos + 1..].to_string())
-    } else {
-        (clean.to_string(), String::new())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use arrow::array::{Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use std::sync::Arc;
-
-    #[test]
-    fn test_split_table_prefix_with_partition() {
-        let (table, path) = split_table_prefix("edge-001/event_date=2026-02-25/00001.parquet");
-        assert_eq!(table, "edge-001");
-        assert_eq!(path, "event_date=2026-02-25/00001.parquet");
-    }
-
-    #[test]
-    fn test_split_table_prefix_no_subpath() {
-        let (table, path) = split_table_prefix("edge-001");
-        assert_eq!(table, "edge-001");
-        assert_eq!(path, "");
-    }
-
-    #[test]
-    fn test_split_table_prefix_leading_slash() {
-        let (table, path) = split_table_prefix("/edge-002/data.parquet");
-        assert_eq!(table, "edge-002");
-        assert_eq!(path, "data.parquet");
-    }
-
-    #[test]
-    fn test_split_table_prefix_nested_partitions() {
-        let (table, path) =
-            split_table_prefix("edge-003/year=2026/month=02/00001-000.parquet");
-        assert_eq!(table, "edge-003");
-        assert_eq!(path, "year=2026/month=02/00001-000.parquet");
-    }
-
-    #[test]
-    fn test_group_batch_by_string_column_basic() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("edge_id", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a"])),
-                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
-            ],
-        )
-        .unwrap();
-
-        let groups = group_batch_by_string_column(&batch, 0).unwrap();
-
-        assert_eq!(groups.len(), 2);
-
-        let group_a = &groups["a"];
-        assert_eq!(group_a.num_rows(), 3);
-        let vals_a: Vec<i64> = group_a
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .values()
-            .to_vec();
-        assert_eq!(vals_a, vec![1, 3, 5]);
-
-        let group_b = &groups["b"];
-        assert_eq!(group_b.num_rows(), 2);
-        let vals_b: Vec<i64> = group_b
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .values()
-            .to_vec();
-        assert_eq!(vals_b, vec![2, 4]);
-    }
-
-    #[test]
-    fn test_group_batch_by_string_column_single_group() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("edge_id", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["x", "x", "x"])),
-                Arc::new(Int64Array::from(vec![10, 20, 30])),
-            ],
-        )
-        .unwrap();
-
-        let groups = group_batch_by_string_column(&batch, 0).unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups["x"].num_rows(), 3);
-    }
-
-    #[test]
-    fn test_group_batch_skips_nulls() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("edge_id", DataType::Utf8, true),
-            Field::new("value", DataType::Int64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![Some("a"), None, Some("a"), None])),
-                Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
-            ],
-        )
-        .unwrap();
-
-        let groups = group_batch_by_string_column(&batch, 0).unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups["a"].num_rows(), 2);
-    }
-
-    #[test]
-    fn test_group_batch_many_groups() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("edge_id", DataType::Utf8, false),
-            Field::new("sensor", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![
-                    "edge-001", "edge-002", "edge-003", "edge-001", "edge-002", "edge-003",
-                ])),
-                Arc::new(StringArray::from(vec![
-                    "temp", "temp", "humidity", "humidity", "temp", "humidity",
-                ])),
-                Arc::new(Int64Array::from(vec![25, 30, 60, 55, 28, 65])),
-            ],
-        )
-        .unwrap();
-
-        let groups = group_batch_by_string_column(&batch, 0).unwrap();
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups["edge-001"].num_rows(), 2);
-        assert_eq!(groups["edge-002"].num_rows(), 2);
-        assert_eq!(groups["edge-003"].num_rows(), 2);
-
-        // Verify column integrity after split
-        let g1_sensors: Vec<&str> = groups["edge-001"]
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap()
-            .iter()
-            .map(|v| v.unwrap())
-            .collect();
-        assert_eq!(g1_sensors, vec!["temp", "humidity"]);
-    }
-
-    #[test]
-    fn test_table_partition_key_as_hashmap_key() {
-        let mut map: HashMap<TablePartitionKey, String> = HashMap::new();
-        map.insert((Some("edge-001".to_string()), None), "file1".to_string());
-        map.insert((Some("edge-002".to_string()), None), "file2".to_string());
-        map.insert((None, None), "file3".to_string());
-
-        assert_eq!(map.len(), 3);
-        assert_eq!(
-            map.get(&(Some("edge-001".to_string()), None)),
-            Some(&"file1".to_string())
-        );
-        assert_eq!(
-            map.get(&(None, None)),
-            Some(&"file3".to_string())
-        );
-    }
-
-    /// E2E: write parquet files to local temp dirs, commit via Delta, read back
-    #[tokio::test]
-    async fn test_delta_multi_table_commit_e2e() {
-        use super::super::delta::{commit_files_to_delta, load_or_create_table};
-        use super::super::{DeltaTableEntry, FinishedFile};
-        use arroyo_storage::StorageProvider;
-        use parquet::arrow::ArrowWriter;
-        use std::collections::HashMap as StdHashMap;
-        use tempfile::TempDir;
-
-        let base_dir = TempDir::new().unwrap();
-        let base_path = base_dir.path().to_str().unwrap().to_string();
-
-        // Schema: edge_id (string), value (int64)
-        let arrow_schema = Arc::new(Schema::new(vec![
-            Field::new("edge_id", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-
-        // Simulate: process_batch produced files under table prefixes
-        let edge_ids = vec!["edge-001", "edge-002"];
-        let mut all_finished: Vec<FinishedFile> = vec![];
-
-        for edge_id in &edge_ids {
-            let sub_dir = base_dir.path().join(edge_id);
-            std::fs::create_dir_all(&sub_dir).unwrap();
-
-            // Write a real parquet file
-            let file_name = "00001-000.parquet";
-            let file_path = sub_dir.join(file_name);
-
-            let batch = RecordBatch::try_new(
-                arrow_schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec![*edge_id; 3])),
-                    Arc::new(Int64Array::from(vec![10, 20, 30])),
-                ],
-            )
-            .unwrap();
-
-            let file = std::fs::File::create(&file_path).unwrap();
-            let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), None).unwrap();
-            writer.write(&batch).unwrap();
-            writer.close().unwrap();
-
-            let file_size = std::fs::metadata(&file_path).unwrap().len() as usize;
-
-            // FinishedFile with table prefix (as produced by process_batch)
-            all_finished.push(FinishedFile {
-                filename: format!("{}/{}", edge_id, file_name),
-                partition: None,
-                size: file_size,
-                metadata: None,
-            });
-        }
-
-        // --- Simulate DeltaLakeMulti commit logic (mirrors handle_commit) ---
-        let mut tables: StdHashMap<String, DeltaTableEntry> = StdHashMap::new();
-
-        // Group by table prefix
-        let mut table_files: StdHashMap<String, Vec<FinishedFile>> = StdHashMap::new();
-        for file in &all_finished {
-            let (table_name, relative_path) = split_table_prefix(&file.filename);
-            table_files
-                .entry(table_name)
-                .or_default()
-                .push(FinishedFile {
-                    filename: relative_path,
-                    partition: file.partition.clone(),
-                    size: file.size,
-                    metadata: file.metadata.clone(),
-                });
-        }
-
-        assert_eq!(table_files.len(), 2, "should have 2 table groups");
-
-        // Commit each table
-        for (table_name, files) in &table_files {
-            let sub_path = format!("file://{}/{}", base_path, table_name);
-            let provider = StorageProvider::for_url_with_options(&sub_path, HashMap::new())
-                .await
-                .unwrap();
-
-            let dt = load_or_create_table(&provider, &arrow_schema).await.unwrap();
-            let version = dt.version().unwrap_or(-1);
-            tables.insert(
-                table_name.clone(),
-                DeltaTableEntry {
-                    table: dt,
-                    last_version: version,
-                },
-            );
-
-            let entry = tables.get_mut(table_name).unwrap();
-            let new_version =
-                commit_files_to_delta(files, &mut entry.table, entry.last_version)
-                    .await
-                    .unwrap();
-            if let Some(v) = new_version {
-                entry.last_version = v;
-            }
-        }
-
-        // --- Verify ---
-        // 1. Each edge has its own _delta_log
-        for edge_id in &edge_ids {
-            let delta_log = base_dir.path().join(edge_id).join("_delta_log");
-            assert!(
-                delta_log.exists(),
-                "_delta_log should exist for {}",
-                edge_id
-            );
-        }
-
-        // 2. Each table was committed (version >= 0)
-        for (name, entry) in &tables {
-            assert!(
-                entry.last_version >= 0,
-                "table {} should have version >= 0, got {}",
-                name,
-                entry.last_version
-            );
-        }
-
-        // 3. Reload tables and verify file count
-        for edge_id in &edge_ids {
-            let sub_path = format!("file://{}/{}", base_path, edge_id);
-            let provider = StorageProvider::for_url_with_options(&sub_path, HashMap::new())
-                .await
-                .unwrap();
-            let table = load_or_create_table(&provider, &arrow_schema).await.unwrap();
-
-            let files = table.get_files_iter().unwrap().collect::<Vec<_>>();
-            assert_eq!(
-                files.len(),
-                1,
-                "{} should have exactly 1 data file",
-                edge_id
-            );
-        }
-
-        // 4. No _delta_log at base level (only in sub-tables)
-        let base_delta_log = base_dir.path().join("_delta_log");
-        assert!(
-            !base_delta_log.exists(),
-            "base path should NOT have _delta_log"
-        );
     }
 }

@@ -308,7 +308,7 @@ impl Connector for IcebergConnector {
                     TableFormat::Iceberg(Box::new(tf)),
                     PartitionerMode::Iceberg(sink.partitioning),
                     None,
-                    None,
+                    None, // table_column not supported for Iceberg
                 )
             }
         }

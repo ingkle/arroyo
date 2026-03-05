@@ -63,6 +63,30 @@ impl TryFrom<&str> for DecimalEncoding {
 }
 
 #[derive(
+    Serialize, Deserialize, Default, Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonCompression {
+    #[default]
+    Uncompressed,
+    Gzip,
+}
+
+impl FromStr for JsonCompression {
+    type Err = DataFusionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "uncompressed" => JsonCompression::Uncompressed,
+            "gzip" => JsonCompression::Gzip,
+            _ => {
+                return plan_err!("invalid json compression '{s}'");
+            }
+        })
+    }
+}
+
+#[derive(
     Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default, Hash, PartialOrd, ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +111,9 @@ pub struct JsonFormat {
 
     #[serde(default)]
     pub decimal_encoding: DecimalEncoding,
+
+    #[serde(default)]
+    pub compression: JsonCompression,
 }
 
 impl JsonFormat {
@@ -131,6 +158,12 @@ impl JsonFormat {
                 }
             });
 
+        let compression = opts
+            .pull_opt_str("json.compression")?
+            .map(|c| JsonCompression::from_str(&c))
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(Self {
             confluent_schema_registry,
             schema_id: None,
@@ -139,6 +172,7 @@ impl JsonFormat {
             unstructured,
             timestamp_format,
             decimal_encoding,
+            compression,
         })
     }
 }
@@ -376,22 +410,22 @@ pub enum Format {
 
 impl Display for Format {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Format::Json(_) => "json",
-                Format::Avro(_) => "avro",
-                Format::Protobuf(_) => "protobuf",
-                Format::Parquet(_) => "parquet",
-                Format::RawString(_) => "raw_string",
-                Format::RawBytes(_) => "raw_bytes",
-            }
-        )
+        f.write_str(self.name())
     }
 }
 
 impl Format {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Format::Json(_) => "json",
+            Format::Avro(_) => "avro",
+            Format::Protobuf(_) => "protobuf",
+            Format::Parquet(_) => "parquet",
+            Format::RawString(_) => "raw_string",
+            Format::RawBytes(_) => "raw_bytes",
+        }
+    }
+
     pub fn from_opts(opts: &mut ConnectorOptions) -> DFResult<Option<Self>> {
         let Some(name) = opts.pull_opt_str("format")? else {
             return Ok(None);

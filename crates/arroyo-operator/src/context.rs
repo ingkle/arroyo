@@ -138,9 +138,19 @@ impl BatchSender {
                     }
                 }
             } else {
-                // not enough room in the queue, wait to be notified that the receiver has
-                // consumed
-                self.notify.notified().await;
+                // first register the notify listener
+                let notified = self.notify.notified();
+
+                // then recheck -- there may now be space since we checked
+                let cur = self.queued_messages.load(Ordering::Acquire);
+                if cur as usize + count as usize <= self.size as usize {
+                    // space is now available, retry immediately
+                    continue;
+                }
+
+                // if not, we're now guaranteed to receive the notification if space is made
+                // available
+                notified.await;
             }
         }
     }
@@ -364,21 +374,23 @@ impl SourceCollector {
         for error in errors {
             match (bad_data, error) {
                 (BadData::Drop { .. }, DataflowError::DataError { count, details }) => {
-                    self.error_rate_limiter
-                        .rate_limit(|| async {
-                            warn!("Dropping invalid data ({count}): {details}");
-                            self.control_tx
-                                .send(ControlResp::Error {
-                                    node_id: self.task_info.node_id,
-                                    operator_id: self.task_info.operator_id.clone(),
-                                    task_index: self.task_info.task_index as usize,
-                                    message: format!("Dropping invalid data ({count})"),
-                                    details,
-                                })
-                                .await
-                                .unwrap();
-                        })
-                        .await;
+                    if config().pipeline.store_deserialization_errors {
+                        self.error_rate_limiter
+                            .rate_limit(|| async {
+                                warn!("Dropping invalid data ({count}): {details}");
+                                self.control_tx
+                                    .send(ControlResp::Error {
+                                        node_id: self.task_info.node_id,
+                                        operator_id: self.task_info.operator_id.clone(),
+                                        task_index: self.task_info.task_index as usize,
+                                        message: format!("Dropping invalid data ({count})"),
+                                        details,
+                                    })
+                                    .await
+                                    .unwrap();
+                            })
+                            .await;
+                    }
 
                     TaskCounters::DeserializationErrors.for_connection(
                         &self.collector.chain_info,

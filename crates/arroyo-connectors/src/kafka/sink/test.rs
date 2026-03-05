@@ -82,11 +82,11 @@ impl KafkaTopicTester {
             timestamp_field: None,
             timestamp_col: None,
             key_field: None,
+            key_col: None,
             write_futures: vec![],
             client_config: HashMap::new(),
             context: Context::new(None),
             serializer: ArrowSerializer::new(Format::Json(JsonFormat::default())),
-            key_col: None,
         };
 
         let (command_tx, _) = channel(128);

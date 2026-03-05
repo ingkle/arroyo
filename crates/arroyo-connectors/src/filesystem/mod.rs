@@ -40,6 +40,14 @@ pub enum TableFormat {
 }
 
 impl TableFormat {
+    pub fn name(&self) -> &'static str {
+        match self {
+            TableFormat::None => "none",
+            TableFormat::Delta => "delta",
+            TableFormat::Iceberg(_) => "iceberg",
+        }
+    }
+
     pub async fn get_storage_provider(
         &mut self,
         task_info: Arc<TaskInfo>,
@@ -87,8 +95,18 @@ pub fn make_sink(
 
     let format = config.format.expect("must have format for FileSystemSink");
 
-    if table_column.is_some() && (is_local || sink.version == SinkVersion::V1) {
-        bail!("table_column requires sink.version = 'v2' and non-local storage");
+    if table_column.is_some() && is_local {
+        bail!(
+            "table_column requires V2 sinks; set `sink.version = 'v2'` and use \
+             a non-local storage backend"
+        );
+    }
+
+    if table_column.is_some() && sink.version == SinkVersion::V1 {
+        bail!(
+            "table_column requires V2 sinks; set `sink.version = 'v2'` and use \
+             a non-local storage backend"
+        );
     }
 
     match (&format, is_local, sink.version) {

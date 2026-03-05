@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use ::arrow::datatypes::Schema;
 use deltalake::DeltaTable;
 use futures::{Future, stream::FuturesUnordered};
 use futures::{TryStreamExt, stream::StreamExt};
@@ -81,6 +80,8 @@ impl<R: BatchBufferingWriter + Send + 'static> FileSystemSink<R> {
         partitioner_mode: PartitionerMode,
         connection_id: Option<String>,
     ) -> TwoPhaseCommitterOperator<Self> {
+        let output_format = format.name();
+        let table_format_name = table_format.name();
         TwoPhaseCommitterOperator::new(Self {
             sender: None,
             checkpoint_receiver: None,
@@ -96,6 +97,8 @@ impl<R: BatchBufferingWriter + Send + 'static> FileSystemSink<R> {
             event_logger: FsEventLogger {
                 task_info: None,
                 connection_id: connection_id.unwrap_or_default().into(),
+                output_format,
+                table_format: table_format_name,
             },
             _ts: Default::default(),
         })
@@ -187,6 +190,8 @@ fn map_object_store_error(obj_err: &object_store::Error) -> DataflowError {
 pub struct FsEventLogger {
     task_info: Option<Arc<TaskInfo>>,
     connection_id: Arc<String>,
+    output_format: &'static str,
+    table_format: &'static str,
 }
 
 impl FsEventLogger {
@@ -210,6 +215,8 @@ impl FsEventLogger {
             "connection_id": self.connection_id.as_str(),
             "write_error_reason": failure_message.as_deref().unwrap_or(""),
             "subtask_idx": task_info.task_index,
+            "output_format": self.output_format,
+            "table_format": self.table_format,
         }, [
             "bytes_written" => bytes as f64,
             "files_written" => files as f64,
@@ -414,10 +421,13 @@ struct AsyncMultipartFileSystemWriter<BBW: BatchBufferingWriter> {
     partitioner: Arc<Partitioner>,
 }
 
+/// Represents a Delta table entry for multi-table routing
 #[derive(Debug)]
 pub struct DeltaTableEntry {
-    pub table: DeltaTable,
+    pub table_path: String,
     pub last_version: i64,
+    pub table: Box<DeltaTable>,
+    pub files: Vec<FinishedFile>,
 }
 
 #[derive(Debug)]
@@ -427,10 +437,14 @@ pub enum CommitState {
         table: Box<DeltaTable>,
     },
     DeltaLakeMulti {
+        /// Maps table_name -> DeltaTableEntry
         tables: HashMap<String, DeltaTableEntry>,
+        /// Base path (e.g., s3://bucket/prefix)
         base_path: String,
+        /// Storage options for creating per-table providers
         storage_options: HashMap<String, String>,
-        schema: Schema,
+        /// Schema for creating new tables
+        schema: ::arrow::datatypes::Schema,
     },
     Iceberg(Box<IcebergTable>),
     VanillaParquet,
@@ -763,7 +777,7 @@ where
         let mut file_naming = sink_config.file_naming.clone();
 
         if file_naming.suffix.is_none() {
-            file_naming.suffix = Some(BBW::suffix());
+            file_naming.suffix = Some(BBW::suffix_for_format(&format).to_owned());
         }
 
         Ok(Self {
@@ -1010,7 +1024,7 @@ where
                 }
             }
             CommitState::DeltaLakeMulti { .. } => {
-                unreachable!("DeltaLakeMulti is only supported in V2 sink");
+                unreachable!("DeltaLakeMulti is not supported in V1 sinks")
             }
             CommitState::Iceberg(table) => {
                 table.commit(epoch, &finished_files).await?;
@@ -1036,7 +1050,7 @@ where
     fn delta_version(&mut self) -> i64 {
         match &self.commit_state {
             CommitState::DeltaLake { last_version, .. } => *last_version,
-            CommitState::DeltaLakeMulti { .. } => -1,
+            CommitState::DeltaLakeMulti { .. } => 0,
             CommitState::VanillaParquet => 0,
             CommitState::Iceberg { .. } => 0,
         }
@@ -1513,7 +1527,12 @@ pub trait BatchBufferingWriter: Send {
         iceberg_schema: Option<::iceberg::spec::SchemaRef>,
         event_logger: FsEventLogger,
     ) -> Self;
-    fn suffix() -> String;
+
+    /// Returns the file suffix based on the format configuration.
+    /// This allows writers to customize the suffix based on format options
+    /// (e.g., "json.gz" for compressed JSON, "json" for uncompressed).
+    fn suffix_for_format(format: &Format) -> &str;
+
     fn add_batch_data(&mut self, data: &RecordBatch);
     /// approximate number of bytes that are internally buffered in the underlying writer;
     /// unflushed_bytes() + buffered_bytes() should give approximately the size of the buffer

@@ -64,8 +64,6 @@ impl KafkaTable {
     pub fn subject(&self) -> Cow<'_, str> {
         match &self.value_subject {
             None => {
-                // For single topic, use the standard subject naming convention
-                // For patterns, the value_subject should be explicitly set
                 let topic = self
                     .topic
                     .as_ref()
