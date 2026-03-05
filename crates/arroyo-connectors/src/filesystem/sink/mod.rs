@@ -421,11 +421,30 @@ struct AsyncMultipartFileSystemWriter<BBW: BatchBufferingWriter> {
     partitioner: Arc<Partitioner>,
 }
 
+/// Represents a Delta table entry for multi-table routing
+#[derive(Debug)]
+pub struct DeltaTableEntry {
+    pub table_path: String,
+    pub last_version: i64,
+    pub table: Box<DeltaTable>,
+    pub files: Vec<FinishedFile>,
+}
+
 #[derive(Debug)]
 pub enum CommitState {
     DeltaLake {
         last_version: i64,
         table: Box<DeltaTable>,
+    },
+    DeltaLakeMulti {
+        /// Maps table_name -> DeltaTableEntry
+        tables: HashMap<String, DeltaTableEntry>,
+        /// Base path (e.g., s3://bucket/prefix)
+        base_path: String,
+        /// Storage options for creating per-table providers
+        storage_options: HashMap<String, String>,
+        /// Schema for creating new tables
+        schema: ::arrow::datatypes::Schema,
     },
     Iceberg(Box<IcebergTable>),
     VanillaParquet,
@@ -435,6 +454,7 @@ impl CommitState {
     fn name(&self) -> &'static str {
         match self {
             CommitState::DeltaLake { .. } => "delta",
+            CommitState::DeltaLakeMulti { .. } => "delta_multi",
             CommitState::Iceberg(_) => "iceberg",
             CommitState::VanillaParquet => "none",
         }
@@ -1003,6 +1023,9 @@ where
                     *last_version = new_version;
                 }
             }
+            CommitState::DeltaLakeMulti { .. } => {
+                unreachable!("DeltaLakeMulti is not supported in V1 sinks")
+            }
             CommitState::Iceberg(table) => {
                 table.commit(epoch, &finished_files).await?;
             }
@@ -1027,6 +1050,7 @@ where
     fn delta_version(&mut self) -> i64 {
         match &self.commit_state {
             CommitState::DeltaLake { last_version, .. } => *last_version,
+            CommitState::DeltaLakeMulti { .. } => 0,
             CommitState::VanillaParquet => 0,
             CommitState::Iceberg { .. } => 0,
         }

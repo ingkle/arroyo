@@ -26,6 +26,22 @@ use std::{
 use tracing::debug;
 use url::Url;
 
+/// Parse partition values from hive-style paths within the filename.
+/// For example, if the path contains "/year=2024/month=01/", this will
+/// extract {"year": "2024", "month": "01"}.
+#[allow(dead_code)]
+pub fn parse_hive_partition_values(path: &str) -> HashMap<String, Option<String>> {
+    let mut partition_values = HashMap::new();
+    for segment in path.split('/') {
+        if let Some((key, value)) = segment.split_once('=') {
+            if !key.is_empty() {
+                partition_values.insert(key.to_string(), Some(value.to_string()));
+            }
+        }
+    }
+    partition_values
+}
+
 pub(crate) async fn commit_files_to_delta(
     finished_files: &[FinishedFile],
     table: &mut DeltaTable,

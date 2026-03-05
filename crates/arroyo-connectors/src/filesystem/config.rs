@@ -524,6 +524,9 @@ pub struct DeltaLakeSink {
 
     #[serde(default)]
     pub version: SinkVersion,
+
+    #[serde(default)]
+    pub table_column: Option<String>,
 }
 
 impl FromOpts for DeltaLakeSink {
@@ -536,6 +539,7 @@ impl FromOpts for DeltaLakeSink {
             partitioning: opts.pull_struct()?,
             multipart: opts.pull_struct()?,
             version: opts.pull_opt_parsed("sink.version")?.unwrap_or_default(),
+            table_column: opts.pull_opt_str("sink.table_column")?,
         })
     }
 }

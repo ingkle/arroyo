@@ -9,13 +9,14 @@ use super::partitioning::{Partitioner, PartitionerMode};
 use super::v2::checkpoint::{FileToCommit, FilesCheckpointV2};
 use super::v2::uploads::{FsResponse, UploadFuture};
 use super::{
-    BatchBufferingWriter, CommitState, FinishedFile, FsEventLogger, RollingPolicy,
+    BatchBufferingWriter, CommitState, DeltaTableEntry, FinishedFile, FsEventLogger, RollingPolicy,
     add_suffix_prefix, map_storage_error,
 };
 use crate::filesystem::TableFormat;
 use crate::filesystem::config::{self, FilenameStrategy, NamingConfig};
 use crate::filesystem::sink::two_phase_committer::CommitStrategy;
 use crate::filesystem::sink::v2::open_file::{CommitPreparation, OpenFile, PendingSingleFile};
+use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 use arrow::row::OwnedRow;
 use arroyo_operator::context::{Collector, OperatorContext};
@@ -64,6 +65,7 @@ pub struct SinkConfig {
     rolling_policies: Vec<RollingPolicy>,
     // consumed on start
     table_format: Option<TableFormat>,
+    table_column: Option<String>,
 }
 
 impl SinkConfig {
@@ -90,6 +92,7 @@ pub struct SinkContext {
     iceberg_schema: Option<iceberg::spec::SchemaRef>,
     task_info: Arc<TaskInfo>,
     commit_state: CommitState,
+    table_column_index: Option<usize>,
 }
 
 /// test utility to precisely cause failures
@@ -128,8 +131,30 @@ impl SinkContext {
 
         let mut iceberg_schema = None;
 
-        let commit_state = match table_format {
-            TableFormat::Delta => CommitState::DeltaLake {
+        let table_column_index = config.table_column.as_ref().map(|col_name| {
+            schema
+                .schema
+                .index_of(col_name)
+                .unwrap_or_else(|_| panic!("table_column '{col_name}' not found in schema"))
+        });
+
+        let has_table_column = config.table_column.is_some();
+        let commit_state = match (table_format, has_table_column) {
+            (TableFormat::Delta, true) => CommitState::DeltaLakeMulti {
+                tables: HashMap::new(),
+                base_path: config.config.path.trim_end_matches('/').to_string(),
+                storage_options: config.config.storage_options.clone(),
+                schema: schema.schema_without_timestamp(),
+            },
+            (TableFormat::Iceberg(_), true) => {
+                return Err(connector_err!(
+                    User,
+                    NoRetry,
+                    "table_column is not supported for Iceberg sinks. \
+                     Iceberg requires a fixed table location."
+                ));
+            }
+            (TableFormat::Delta, false) => CommitState::DeltaLake {
                 last_version: -1,
                 table: Box::new(
                     load_or_create_table(&provider, &schema.schema_without_timestamp())
@@ -144,14 +169,14 @@ impl SinkContext {
                         })?,
                 ),
             },
-            TableFormat::Iceberg(mut table) => {
+            (TableFormat::Iceberg(mut table), false) => {
                 let t = table
                     .load_or_create(task_info.clone(), &schema.schema)
                     .await?;
                 iceberg_schema = Some(t.metadata().current_schema().clone());
                 CommitState::Iceberg(table)
             }
-            TableFormat::None => CommitState::VanillaParquet,
+            (TableFormat::None, _) => CommitState::VanillaParquet,
         };
 
         Ok(SinkContext {
@@ -164,6 +189,7 @@ impl SinkContext {
             iceberg_schema,
             task_info: task_info.clone(),
             commit_state,
+            table_column_index,
         })
     }
 }
@@ -174,6 +200,7 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
         config: &SinkConfig,
         context: &SinkContext,
         partition: &Option<OwnedRow>,
+        table_prefix: Option<&str>,
     ) -> String {
         let filename_strategy = config.file_naming.strategy.unwrap_or_default();
 
@@ -202,6 +229,11 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
             filename = format!("{hive}/{filename}");
         }
 
+        // For multi-table routing, prepend the table name as a subdirectory
+        if let Some(table) = table_prefix {
+            filename = format!("{table}/{filename}");
+        }
+
         filename
     }
 
@@ -212,6 +244,7 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
         context: &SinkContext,
         partition: &Option<OwnedRow>,
         representative_ts: SystemTime,
+        table_prefix: Option<&str>,
     ) -> &mut OpenFile<BBW> {
         let file = self
             .active_partitions
@@ -219,7 +252,7 @@ impl<BBW: BatchBufferingWriter> ActiveState<BBW> {
             .and_then(|f| self.open_files.get(f));
 
         if file.is_none() || !file.unwrap().is_writable() {
-            let file_path = self.next_file_path(config, context, partition);
+            let file_path = self.next_file_path(config, context, partition, table_prefix);
             let path = Arc::new(Path::from(file_path));
 
             let batch_writer = BBW::new(
@@ -297,6 +330,7 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
         format: Format,
         partitioner_mode: PartitionerMode,
         connection_id: Option<String>,
+        table_column: Option<String>,
     ) -> Self {
         let mut file_naming = config.file_naming.clone();
         if file_naming.suffix.is_none() {
@@ -315,6 +349,7 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
                 table_format: Some(table_format),
                 file_naming,
                 partitioner_mode,
+                table_column,
             },
             context: None,
             active: ActiveState {
@@ -339,7 +374,9 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
 
     fn commit_strategy(&self) -> CommitStrategy {
         match self.context.as_ref().unwrap().commit_state {
-            CommitState::DeltaLake { .. } | CommitState::Iceberg(_) => CommitStrategy::PerOperator,
+            CommitState::DeltaLake { .. }
+            | CommitState::DeltaLakeMulti { .. }
+            | CommitState::Iceberg(_) => CommitStrategy::PerOperator,
             CommitState::VanillaParquet => CommitStrategy::PerSubtask,
         }
     }
@@ -386,8 +423,65 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
     fn delta_version(&self) -> i64 {
         match &self.context.as_ref().unwrap().commit_state {
             CommitState::DeltaLake { last_version, .. } => *last_version,
+            CommitState::DeltaLakeMulti { .. } => -1, // multi-table tracks versions per table
             _ => -1,
         }
+    }
+
+    async fn process_batch_inner(
+        &mut self,
+        batch: RecordBatch,
+        timestamp_index: usize,
+        table_prefix: Option<&str>,
+    ) -> DataflowResult<()> {
+        let partitioner = &self.context.as_ref().unwrap().partitioner;
+
+        let partitions: Vec<(Option<OwnedRow>, RecordBatch)> = if partitioner.is_partitioned() {
+            partitioner
+                .partition(&batch)?
+                .into_iter()
+                .map(|(k, b)| (Some(k), b))
+                .collect()
+        } else {
+            vec![(None, batch)]
+        };
+
+        for (partition_key, sub_batch) in partitions {
+            let representative_timestamp =
+                representitive_timestamp(sub_batch.column(timestamp_index)).map_err(|e| {
+                    connector_err!(
+                        Internal,
+                        NoRetry,
+                        source: e,
+                        "failed to get representative timestamp"
+                    )
+                })?;
+
+            let file = self.active.get_or_create_file(
+                &self.config,
+                self.event_logger.clone(),
+                self.context.as_ref().unwrap(),
+                &partition_key,
+                representative_timestamp,
+                table_prefix,
+            );
+            let future = file.add_batch(&sub_batch)?;
+
+            if let Some(future) = future {
+                let futures = self.upload.pending_uploads.lock().await;
+                futures.push(future);
+            }
+
+            if self
+                .upload
+                .roll_file_if_ready(&self.config.rolling_policies, self.watermark, file)
+                .await?
+            {
+                self.active.active_partitions.remove(&partition_key);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -493,50 +587,54 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
         _collector: &mut dyn Collector,
     ) -> DataflowResult<()> {
         let timestamp_index = self.context.as_ref().unwrap().schema.timestamp_index;
-        let partitioner = &self.context.as_ref().unwrap().partitioner;
+        let table_column_index = self.context.as_ref().unwrap().table_column_index;
 
-        let partitions: Vec<(Option<OwnedRow>, RecordBatch)> = if partitioner.is_partitioned() {
-            partitioner
-                .partition(&batch)?
-                .into_iter()
-                .map(|(k, b)| (Some(k), b))
-                .collect()
+        // If table_column is configured, split by table name first
+        if let Some(table_col_idx) = table_column_index {
+            let table_col = batch.column(table_col_idx).as_string::<i32>();
+
+            // Group rows by table name
+            let mut table_groups: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+            for i in 0..batch.num_rows() {
+                let table_name = if table_col.is_null(i) {
+                    None
+                } else {
+                    Some(table_col.value(i).to_string())
+                };
+                table_groups.entry(table_name).or_default().push(i);
+            }
+
+            for (table_name, indices) in table_groups {
+                let table_name = match table_name {
+                    Some(name) => name,
+                    None => {
+                        warn!(
+                            "Skipping {} rows with null table_column value",
+                            indices.len()
+                        );
+                        continue;
+                    }
+                };
+
+                let indices_array =
+                    arrow::array::UInt32Array::from_iter_values(indices.iter().map(|&i| i as u32));
+                let sub_batch =
+                    arrow::compute::take_record_batch(&batch, &indices_array).map_err(|e| {
+                        connector_err!(
+                            Internal,
+                            NoRetry,
+                            source: e.into(),
+                            "failed to take sub-batch for table '{}'",
+                            table_name
+                        )
+                    })?;
+
+                self.process_batch_inner(sub_batch, timestamp_index, Some(&table_name))
+                    .await?;
+            }
         } else {
-            vec![(None, batch)]
-        };
-
-        for (partition_key, sub_batch) in partitions {
-            let representative_timestamp =
-                representitive_timestamp(sub_batch.column(timestamp_index)).map_err(|e| {
-                    connector_err!(
-                        Internal,
-                        NoRetry,
-                        source: e,
-                        "failed to get representative timestamp"
-                    )
-                })?;
-
-            let file = self.active.get_or_create_file(
-                &self.config,
-                self.event_logger.clone(),
-                self.context.as_ref().unwrap(),
-                &partition_key,
-                representative_timestamp,
-            );
-            let future = file.add_batch(&sub_batch)?;
-
-            if let Some(future) = future {
-                let futures = self.upload.pending_uploads.lock().await;
-                futures.push(future);
-            }
-
-            if self
-                .upload
-                .roll_file_if_ready(&self.config.rolling_policies, self.watermark, file)
-                .await?
-            {
-                self.active.active_partitions.remove(&partition_key);
-            }
+            self.process_batch_inner(batch, timestamp_index, None)
+                .await?;
         }
 
         Ok(())
@@ -812,6 +910,113 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
                         )? {
                         *last_version = new_version;
                     }
+                }
+                CommitState::DeltaLakeMulti {
+                    tables,
+                    base_path,
+                    storage_options,
+                    schema,
+                } => {
+                    // Group finished files by table name (first path component)
+                    let mut table_files: HashMap<String, Vec<FinishedFile>> = HashMap::new();
+                    for file in finished_files.iter() {
+                        let table_name = file
+                            .filename
+                            .split('/')
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string();
+                        table_files
+                            .entry(table_name)
+                            .or_default()
+                            .push(FinishedFile {
+                                // Strip the table_name prefix from the filename
+                                // so the path is relative to the table root
+                                filename: file
+                                    .filename
+                                    .strip_prefix(&format!(
+                                        "{}/",
+                                        file.filename.split('/').next().unwrap_or("")
+                                    ))
+                                    .unwrap_or(&file.filename)
+                                    .to_string(),
+                                partition: file.partition.clone(),
+                                size: file.size,
+                                metadata: file.metadata.clone(),
+                            });
+                    }
+
+                    let mut commit_count = 0;
+                    for (table_name, files) in table_files.iter() {
+                        if files.is_empty() {
+                            continue;
+                        }
+
+                        // Get or create the DeltaTable entry for this table
+                        if !tables.contains_key(table_name) {
+                            let table_url =
+                                format!("{base_path}/{table_name}");
+                            let table_provider =
+                                StorageProvider::for_url_with_options(
+                                    &table_url,
+                                    storage_options.clone(),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    map_storage_error(e)
+                                })?;
+                            let delta_table =
+                                load_or_create_table(&table_provider, schema)
+                                    .await
+                                    .map_err(|e| {
+                                        connector_err!(
+                                            External,
+                                            WithBackoff,
+                                            source: e,
+                                            "failed to load or create delta table '{}'",
+                                            table_name
+                                        )
+                                    })?;
+                            tables.insert(
+                                table_name.clone(),
+                                DeltaTableEntry {
+                                    table_path: table_name.clone(),
+                                    last_version: -1,
+                                    table: Box::new(delta_table),
+                                    files: vec![],
+                                },
+                            );
+                        }
+
+                        let entry = tables.get_mut(table_name).unwrap();
+
+                        info!(
+                            "Committing {} files to Delta table '{}' at {}",
+                            files.len(),
+                            table_name,
+                            entry.table_path
+                        );
+
+                        if let Some(new_version) = commit_files_to_delta(
+                            files,
+                            &mut entry.table,
+                            entry.last_version,
+                        )
+                        .await
+                        .map_err(|e| {
+                            connector_err!(
+                                External,
+                                WithBackoff,
+                                source: e,
+                                "failed to commit to delta table '{}'",
+                                table_name
+                            )
+                        })? {
+                            entry.last_version = new_version;
+                        }
+                        commit_count += 1;
+                    }
+                    info!("Committed to {} Delta tables", commit_count);
                 }
                 CommitState::Iceberg(table) => {
                     table.commit(epoch, &finished_files).await.map_err(

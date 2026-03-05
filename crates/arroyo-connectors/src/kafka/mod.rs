@@ -28,6 +28,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Receiver;
@@ -62,9 +63,26 @@ import_types!(schema = "src/kafka/table.json");
 impl KafkaTable {
     pub fn subject(&self) -> Cow<'_, str> {
         match &self.value_subject {
-            None => Cow::Owned(format!("{}-value", self.topic)),
+            None => {
+                let topic = self
+                    .topic
+                    .as_ref()
+                    .map(|t| format!("{t}-value"))
+                    .unwrap_or_else(|| "unknown-value".to_string());
+                Cow::Owned(topic)
+            }
             Some(s) => Cow::Borrowed(s),
         }
+    }
+
+    /// Returns the topic name or pattern for display purposes
+    pub fn topic_display(&self) -> String {
+        self.topic.clone().unwrap_or_else(|| {
+            self.topic_pattern
+                .clone()
+                .map(|p| format!("pattern:{p}"))
+                .unwrap_or_else(|| "unknown".to_string())
+        })
     }
 }
 
@@ -143,6 +161,7 @@ impl KafkaConnector {
                     },
                     timestamp_field: options.pull_opt_str("sink.timestamp_field")?,
                     key_field: options.pull_opt_str("sink.key_field")?,
+                    topic_field: options.pull_opt_str("sink.topic_field")?,
                 }
             }
             _ => {
@@ -150,8 +169,40 @@ impl KafkaConnector {
             }
         };
 
+        let topic = options.pull_opt_str("topic")?;
+        let topic_pattern = options.pull_opt_str("topic_pattern")?;
+
+        // Validate based on table type
+        match &table_type {
+            TableType::Source { .. } => {
+                // Source: exactly one of topic or topic_pattern must be set
+                match (&topic, &topic_pattern) {
+                    (None, None) => {
+                        bail!("Either 'topic' or 'topic_pattern' must be specified for source")
+                    }
+                    (Some(_), Some(_)) => bail!("Cannot specify both 'topic' and 'topic_pattern'"),
+                    _ => {}
+                }
+            }
+            TableType::Sink { topic_field, .. } => {
+                // Sink: topic_pattern not allowed
+                if topic_pattern.is_some() {
+                    bail!("'topic_pattern' can only be used with source tables, not sinks");
+                }
+                // Sink: exactly one of topic or topic_field must be set
+                match (&topic, topic_field) {
+                    (None, None) => {
+                        bail!("Either 'topic' or 'topic_field' must be specified for sink")
+                    }
+                    (Some(_), Some(_)) => bail!("Cannot specify both 'topic' and 'topic_field'"),
+                    _ => {}
+                }
+            }
+        }
+
         Ok(KafkaTable {
-            topic: options.pull_str("topic")?,
+            topic,
+            topic_pattern,
             type_: table_type,
             client_configs: options
                 .pull_opt_str("client_configs")?
@@ -207,9 +258,12 @@ impl Connector for KafkaConnector {
         let (typ, desc) = match table.type_ {
             TableType::Source { .. } => (
                 ConnectionType::Source,
-                format!("KafkaSource<{}>", table.topic),
+                format!("KafkaSource<{}>", table.topic_display()),
             ),
-            TableType::Sink { .. } => (ConnectionType::Sink, format!("KafkaSink<{}>", table.topic)),
+            TableType::Sink { .. } => (
+                ConnectionType::Sink,
+                format!("KafkaSink<{}>", table.topic_display()),
+            ),
         };
 
         let schema = schema
@@ -408,7 +462,8 @@ impl Connector for KafkaConnector {
 
                 Ok(ConstructedOperator::from_source(Box::new(
                     KafkaSourceFunc {
-                        topic: table.topic,
+                        topic: table.topic.clone(),
+                        topic_pattern: table.topic_pattern.clone(),
                         bootstrap_servers: profile.bootstrap_servers.to_string(),
                         group_id: group_id.clone(),
                         group_id_prefix: group_id_prefix.clone(),
@@ -434,6 +489,7 @@ impl Connector for KafkaConnector {
                 commit_mode,
                 key_field,
                 timestamp_field,
+                topic_field,
             } => Ok(ConstructedOperator::from_operator(Box::new(
                 KafkaSinkFunc {
                     bootstrap_servers: profile.bootstrap_servers.to_string(),
@@ -443,10 +499,12 @@ impl Connector for KafkaConnector {
                     timestamp_col: None,
                     key_field: key_field.clone(),
                     key_col: None,
+                    topic: table.topic.clone(),
+                    topic_field: topic_field.clone(),
+                    topic_col: None,
                     write_futures: vec![],
                     client_config: client_configs(&profile, Some(table.clone()))?,
                     context: Context::new(Some(profile.clone())),
-                    topic: table.topic,
                     serializer: ArrowSerializer::new(
                         config.format.expect("Format must be defined for KafkaSink"),
                     ),
@@ -767,10 +825,14 @@ impl KafkaTester {
 
         self.info(&mut tx, "Connected to Kafka").await;
 
-        let topic = table.topic.clone();
+        // For testing, topic must be specified (not topic_pattern)
+        let topic = table
+            .topic
+            .as_ref()
+            .ok_or_else(|| anyhow!("Testing requires a specific topic, not a pattern"))?;
 
         let metadata = client
-            .fetch_metadata(Some(&topic), Duration::from_secs(10))
+            .fetch_metadata(Some(topic.as_str()), Duration::from_secs(10))
             .map_err(|e| anyhow!("Failed to fetch metadata: {:?}", e))?;
 
         self.info(&mut tx, "Fetched topic metadata").await;
@@ -979,18 +1041,69 @@ type BaseConsumer = rdkafka::consumer::BaseConsumer<Context>;
 type FutureProducer = rdkafka::producer::FutureProducer<Context>;
 type StreamConsumer = rdkafka::consumer::StreamConsumer<Context>;
 
+/// Events sent from rdkafka's rebalance callback to the source operator
+#[derive(Debug)]
+pub enum RebalanceEvent {
+    /// Partitions assigned to this consumer
+    Assign(Vec<(String, i32)>),
+    /// Partitions revoked from this consumer
+    Revoke(Vec<(String, i32)>),
+}
+
 #[derive(Clone)]
 pub struct Context {
     config: Option<KafkaConfig>,
+    rebalance_tx: Option<Arc<tokio_mpsc::UnboundedSender<RebalanceEvent>>>,
 }
 
 impl Context {
     pub fn new(config: Option<KafkaConfig>) -> Self {
-        Self { config }
+        Self {
+            config,
+            rebalance_tx: None,
+        }
+    }
+
+    /// Create a context with a rebalance event channel for pattern subscriptions
+    pub fn with_rebalance_tx(mut self, tx: tokio_mpsc::UnboundedSender<RebalanceEvent>) -> Self {
+        self.rebalance_tx = Some(Arc::new(tx));
+        self
     }
 }
 
-impl ConsumerContext for Context {}
+impl ConsumerContext for Context {
+    fn post_rebalance(
+        &self,
+        _base_consumer: &rdkafka::consumer::BaseConsumer<Self>,
+        rebalance: &rdkafka::consumer::Rebalance<'_>,
+    ) {
+        if let Some(tx) = &self.rebalance_tx {
+            match rebalance {
+                rdkafka::consumer::Rebalance::Assign(tpl) => {
+                    let partitions: Vec<_> = tpl
+                        .elements()
+                        .iter()
+                        .map(|e| (e.topic().to_string(), e.partition()))
+                        .collect();
+                    info!("Rebalance: assigned {} partitions", partitions.len());
+                    let _ = tx.send(RebalanceEvent::Assign(partitions));
+                }
+                rdkafka::consumer::Rebalance::Revoke(tpl) => {
+                    let partitions: Vec<_> = tpl
+                        .elements()
+                        .iter()
+                        .map(|e| (e.topic().to_string(), e.partition()))
+                        .collect();
+                    info!("Rebalance: revoked {} partitions", partitions.len());
+                    let _ = tx.send(RebalanceEvent::Revoke(partitions));
+                }
+                rdkafka::consumer::Rebalance::Error(e) => {
+                    error!("Rebalance error: {}", e);
+                }
+            }
+        }
+    }
+}
 
 impl ProducerContext for Context {
     type DeliveryOpaque = ();
