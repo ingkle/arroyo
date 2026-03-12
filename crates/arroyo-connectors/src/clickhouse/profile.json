@@ -1,0 +1,48 @@
+{
+    "type": "object",
+    "title": "ClickHouseConfig",
+    "properties": {
+        "host": {
+            "title": "Host",
+            "type": "string",
+            "description": "The hostname of the ClickHouse server",
+            "examples": ["localhost"],
+            "format": "var-str"
+        },
+        "port": {
+            "title": "Port",
+            "type": "integer",
+            "description": "The HTTP port of the ClickHouse server (default: 8123)"
+        },
+        "username": {
+            "title": "Username",
+            "type": "string",
+            "description": "The username for authentication",
+            "format": "var-str"
+        },
+        "password": {
+            "title": "Password",
+            "type": "string",
+            "description": "The password for authentication",
+            "format": "var-str"
+        },
+        "database": {
+            "title": "Database",
+            "type": "string",
+            "description": "The target database name",
+            "examples": ["default"],
+            "format": "var-str"
+        },
+        "https": {
+            "title": "Use HTTPS",
+            "type": "boolean",
+            "description": "Whether to use HTTPS for the connection"
+        }
+    },
+    "sensitive": [
+        "password"
+    ],
+    "required": [
+        "host"
+    ]
+}

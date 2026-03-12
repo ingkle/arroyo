@@ -1,6 +1,7 @@
 use super::FinishedFile;
 use anyhow::Result;
 use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
 use arroyo_storage::{BackendConfig, R2Config, S3Config, StorageProvider};
 use arroyo_types::to_millis;
 use delta_kernel::engine::arrow_conversion::TryFromArrow;
@@ -15,6 +16,7 @@ use deltalake::{
 };
 
 use deltalake::kernel::transaction::CommitBuilder;
+use deltalake::operations::write::{SchemaMode, WriteBuilder};
 use itertools::Itertools;
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -64,6 +66,7 @@ pub(crate) async fn commit_files_to_delta(
 pub(crate) async fn load_or_create_table(
     storage_provider: &StorageProvider,
     schema: &Schema,
+    partition_columns: Vec<String>,
 ) -> Result<DeltaTable> {
     deltalake::aws::register_handlers(None);
     deltalake::gcp::register_handlers(None);
@@ -113,12 +116,17 @@ pub(crate) async fn load_or_create_table(
     } else {
         let delta_schema = StructType::try_from_arrow(schema)?;
 
-        Ok(CreateBuilder::new()
+        let mut builder = CreateBuilder::new()
             .with_log_store(delta.log_store())
             .with_columns(delta_schema.fields().cloned())
             .with_configuration_property(MinReaderVersion, Some("3"))
-            .with_configuration_property(MinWriterVersion, Some("7"))
-            .await?)
+            .with_configuration_property(MinWriterVersion, Some("7"));
+
+        if !partition_columns.is_empty() {
+            builder = builder.with_partition_columns(partition_columns);
+        }
+
+        Ok(builder.await?)
     }
 }
 
@@ -185,4 +193,29 @@ async fn commit_to_delta(table: &mut DeltaTable, add_actions: Vec<Action>) -> Re
         )
         .await?
         .version)
+}
+
+/// Write RecordBatches to a Delta table using the high-level WriteBuilder API.
+/// This handles file writing, Delta commit, partitioning, and schema evolution automatically.
+pub(crate) async fn write_batches_to_delta(
+    table: &mut DeltaTable,
+    batches: Vec<RecordBatch>,
+    partition_columns: Vec<String>,
+) -> Result<i64> {
+    let mut builder = WriteBuilder::new(table.log_store(), table.snapshot().ok().cloned())
+        .with_input_batches(batches)
+        .with_schema_mode(SchemaMode::Merge)
+        .with_save_mode(SaveMode::Append);
+
+    if !partition_columns.is_empty() {
+        builder = builder.with_partition_columns(partition_columns);
+    }
+
+    let result_table = builder.await?;
+    let version = result_table.version().unwrap_or(0);
+
+    // Update the caller's table state
+    *table = result_table;
+
+    Ok(version)
 }

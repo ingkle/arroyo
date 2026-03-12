@@ -632,6 +632,7 @@ dependencies = [
  "typify 0.0.13",
  "ulid",
  "url",
+ "urlencoding",
  "uuid",
 ]
 
@@ -3740,6 +3741,8 @@ dependencies = [
  "cfg-if",
  "chrono",
  "dashmap 6.1.0",
+ "datafusion",
+ "datafusion-proto",
  "delta_kernel",
  "deltalake-derive",
  "either",

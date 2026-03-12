@@ -68,6 +68,9 @@ eventsource-client = "0.13.0"
 # Websocket
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
+# ClickHouse
+urlencoding = "2"
+
 # Webhook
 reqwest = { workspace = true, features = ["stream"] }
 
@@ -92,7 +95,7 @@ aws-config = { workspace = true }
 # Filesystem
 parquet = { workspace = true, features = ["async"] }
 object_store = { workspace = true }
-deltalake = { workspace = true, features = ["s3", "gcs"] }
+deltalake = { workspace = true, features = ["s3", "gcs", "datafusion"] }
 delta_kernel = { workspace = true, features = ["arrow-55", "arrow-conversion"] }
 async-compression = { version = "0.4.3", features = ["tokio", "zstd", "gzip"] }
 flate2 = "1.0.30"

@@ -17,6 +17,7 @@ use tokio::sync::mpsc::Sender;
 use tracing::warn;
 
 pub mod blackhole;
+pub mod clickhouse;
 pub mod confluent;
 pub mod filesystem;
 pub mod fluvio;
@@ -39,6 +40,7 @@ pub mod websocket;
 pub fn connectors() -> HashMap<&'static str, Box<dyn ErasedConnector>> {
     let connectors: Vec<Box<dyn ErasedConnector>> = vec![
         Box::new(blackhole::BlackholeConnector {}),
+        Box::new(clickhouse::ClickHouseConnector {}),
         Box::new(confluent::ConfluentConnector {}),
         Box::new(filesystem::delta::DeltaLakeConnector {}),
         Box::new(filesystem::FileSystemConnector {}),

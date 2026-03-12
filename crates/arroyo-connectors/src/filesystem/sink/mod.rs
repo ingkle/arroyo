@@ -764,7 +764,7 @@ where
             TableFormat::Delta => CommitState::DeltaLake {
                 last_version: -1,
                 table: Box::new(
-                    load_or_create_table(&object_store, &schema.schema_without_timestamp()).await?,
+                    load_or_create_table(&object_store, &schema.schema_without_timestamp(), sink_config.partitioning.fields.clone()).await?,
                 ),
             },
             TableFormat::None => CommitState::VanillaParquet,

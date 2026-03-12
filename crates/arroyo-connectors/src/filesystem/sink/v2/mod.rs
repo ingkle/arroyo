@@ -3,7 +3,7 @@ pub mod migration;
 mod open_file;
 mod uploads;
 
-use super::delta::{commit_files_to_delta, load_or_create_table};
+use super::delta::{load_or_create_table, write_batches_to_delta};
 use super::parquet::representitive_timestamp;
 use super::partitioning::{Partitioner, PartitionerMode};
 use super::v2::checkpoint::{FileToCommit, FilesCheckpointV2};
@@ -28,7 +28,7 @@ use arroyo_state::tables::global_keyed_map::GlobalKeyedView;
 use arroyo_storage::StorageProvider;
 use arroyo_types::{CheckpointBarrier, TaskInfo, Watermark};
 use async_trait::async_trait;
-use bincode::config as bincode_config;
+use bincode::{Decode, Encode, config as bincode_config};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use object_store::path::Path;
@@ -47,6 +47,31 @@ use uuid::Uuid;
 
 const DEFAULT_TARGET_PART_SIZE: usize = 32 * 1024 * 1024;
 
+/// Serializable container for Delta batch data passed through two-phase commit.
+#[derive(Encode, Decode)]
+struct DeltaBatchCommitData {
+    table_name: Option<String>,
+    ipc_data: Vec<u8>,
+}
+
+fn encode_batch_to_ipc(batch: &RecordBatch) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut writer =
+        arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
+    writer.write(batch).unwrap();
+    writer.finish().unwrap();
+    buf
+}
+
+fn decode_batch_from_ipc(ipc_data: &[u8]) -> RecordBatch {
+    let reader = arrow::ipc::reader::StreamReader::try_new(
+        std::io::Cursor::new(ipc_data),
+        None,
+    )
+    .unwrap();
+    reader.into_iter().next().unwrap().unwrap()
+}
+
 pub struct ActiveState<BBW: BatchBufferingWriter + 'static> {
     max_file_index: usize,
     // partition -> filename
@@ -55,6 +80,9 @@ pub struct ActiveState<BBW: BatchBufferingWriter + 'static> {
     open_files: HashMap<Arc<Path>, OpenFile<BBW>>,
     // single files pending local commit (PerSubtask strategy)
     pending_local_commits: Vec<PendingSingleFile>,
+    // Delta WriteBuilder: buffered batches between checkpoints
+    // (table_name, batch) — table_name is Some for DeltaLakeMulti, None for DeltaLake
+    delta_batch_buffer: Vec<(Option<String>, RecordBatch)>,
 }
 
 pub struct SinkConfig {
@@ -93,6 +121,7 @@ pub struct SinkContext {
     task_info: Arc<TaskInfo>,
     commit_state: CommitState,
     table_column_index: Option<usize>,
+    partition_fields: Vec<String>,
 }
 
 /// test utility to precisely cause failures
@@ -157,7 +186,7 @@ impl SinkContext {
             (TableFormat::Delta, false) => CommitState::DeltaLake {
                 last_version: -1,
                 table: Box::new(
-                    load_or_create_table(&provider, &schema.schema_without_timestamp())
+                    load_or_create_table(&provider, &schema.schema_without_timestamp(), config.config.partitioning.fields.clone())
                         .await
                         .map_err(|e| {
                             connector_err!(
@@ -179,6 +208,8 @@ impl SinkContext {
             (TableFormat::None, _) => CommitState::VanillaParquet,
         };
 
+        let partition_fields = config.config.partitioning.fields.clone();
+
         Ok(SinkContext {
             storage_provider: Arc::new(provider),
             partitioner: Arc::new(Partitioner::new(
@@ -190,6 +221,7 @@ impl SinkContext {
             task_info: task_info.clone(),
             commit_state,
             table_column_index,
+            partition_fields,
         })
     }
 }
@@ -357,6 +389,7 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
                 open_files: HashMap::new(),
                 max_file_index: 0,
                 pending_local_commits: vec![],
+                delta_batch_buffer: Vec::new(),
             },
             upload: UploadState {
                 pending_uploads: Arc::new(Mutex::new(FuturesUnordered::new())),
@@ -370,6 +403,13 @@ impl<BBW: BatchBufferingWriter + Send + 'static> FileSystemSinkV2<BBW> {
             },
             watermark: None,
         }
+    }
+
+    fn is_delta_write_mode(&self) -> bool {
+        matches!(
+            self.context.as_ref().unwrap().commit_state,
+            CommitState::DeltaLake { .. } | CommitState::DeltaLakeMulti { .. }
+        )
     }
 
     fn commit_strategy(&self) -> CommitStrategy {
@@ -506,6 +546,19 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
                 state_version: 1,
             },
         );
+        tables.insert(
+            "d".into(),
+            TableConfig {
+                table_type: TableEnum::GlobalKeyValue.into(),
+                config: GlobalKeyedTableConfig {
+                    table_name: "d".into(),
+                    description: "delta batch data".into(),
+                    uses_two_phase_commit: true,
+                }
+                .encode_to_vec(),
+                state_version: 1,
+            },
+        );
         tables
     }
 
@@ -533,7 +586,7 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
             self.active.max_file_index = self.active.max_file_index.max(s.file_index);
         }
 
-        if ctx.task_info.task_index == 0 {
+        if ctx.task_info.task_index == 0 && !self.is_delta_write_mode() {
             for s in state.into_values() {
                 for f in s.open_files {
                     debug!(path = f.path, buffered_size = f.data.0.len(),
@@ -589,6 +642,99 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
         let timestamp_index = self.context.as_ref().unwrap().schema.timestamp_index;
         let table_column_index = self.context.as_ref().unwrap().table_column_index;
 
+        // Delta WriteBuilder mode: buffer RecordBatches in memory
+        if self.is_delta_write_mode() {
+            // Strip _timestamp column
+            let col_indices: Vec<usize> = (0..batch.num_columns())
+                .filter(|&i| i != timestamp_index)
+                .collect();
+            let stripped = batch.project(&col_indices).map_err(|e| {
+                connector_err!(
+                    Internal,
+                    NoRetry,
+                    source: e.into(),
+                    "failed to strip timestamp column"
+                )
+            })?;
+
+            if let Some(table_col_idx) = table_column_index {
+                // DeltaLakeMulti: split by table_column, then strip table_column too
+                // Adjust index for the removed timestamp column
+                let adjusted_idx = if timestamp_index < table_col_idx {
+                    table_col_idx - 1
+                } else {
+                    table_col_idx
+                };
+
+                let table_col = stripped.column(adjusted_idx).as_string::<i32>();
+
+                // Group rows by table name
+                let mut table_groups: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+                for i in 0..stripped.num_rows() {
+                    let table_name = if table_col.is_null(i) {
+                        None
+                    } else {
+                        Some(table_col.value(i).to_string())
+                    };
+                    table_groups.entry(table_name).or_default().push(i);
+                }
+
+                // Column indices excluding the table_column
+                let data_col_indices: Vec<usize> = (0..stripped.num_columns())
+                    .filter(|&i| i != adjusted_idx)
+                    .collect();
+
+                for (table_name, indices) in table_groups {
+                    let table_name = match table_name {
+                        Some(name) => name,
+                        None => {
+                            warn!(
+                                "Skipping {} rows with null table_column value",
+                                indices.len()
+                            );
+                            continue;
+                        }
+                    };
+
+                    let indices_array = arrow::array::UInt32Array::from_iter_values(
+                        indices.iter().map(|&i| i as u32),
+                    );
+                    let sub_batch =
+                        arrow::compute::take_record_batch(&stripped, &indices_array).map_err(
+                            |e| {
+                                connector_err!(
+                                    Internal,
+                                    NoRetry,
+                                    source: e.into(),
+                                    "failed to take sub-batch for table '{}'",
+                                    table_name
+                                )
+                            },
+                        )?;
+
+                    // Strip table_column from the sub_batch
+                    let data_batch = sub_batch.project(&data_col_indices).map_err(|e| {
+                        connector_err!(
+                            Internal,
+                            NoRetry,
+                            source: e.into(),
+                            "failed to strip table_column"
+                        )
+                    })?;
+
+                    self.active
+                        .delta_batch_buffer
+                        .push((Some(table_name), data_batch));
+                }
+            } else {
+                // DeltaLake single table
+                self.active.delta_batch_buffer.push((None, stripped));
+            }
+
+            return Ok(());
+        }
+
+        // Non-Delta mode: existing logic
         // If table_column is configured, split by table name first
         if let Some(table_col_idx) = table_column_index {
             let table_col = batch.column(table_col_idx).as_string::<i32>();
@@ -698,6 +844,51 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
         ctx: &mut OperatorContext,
         _collector: &mut dyn Collector,
     ) -> DataflowResult<()> {
+        if self.is_delta_write_mode() {
+            // Delta WriteBuilder mode: serialize buffered batches via Arrow IPC
+            maybe_cause_failure("checkpoint_start");
+
+            let commit_entries: Vec<DeltaBatchCommitData> = self
+                .active
+                .delta_batch_buffer
+                .drain(..)
+                .map(|(table_name, batch)| DeltaBatchCommitData {
+                    table_name,
+                    ipc_data: encode_batch_to_ipc(&batch),
+                })
+                .collect();
+
+            let serialized =
+                bincode::encode_to_vec(&commit_entries, bincode_config::standard()).unwrap();
+            ctx.table_manager
+                .insert_committing_data("d", serialized)
+                .await;
+
+            // Save minimal recovery state (no open files in Delta mode)
+            let checkpoint = FilesCheckpointV2 {
+                open_files: vec![],
+                file_index: self.active.max_file_index,
+                delta_version: self.delta_version(),
+            };
+            let recovery_state: &mut GlobalKeyedView<usize, FilesCheckpointV2> = ctx
+                .table_manager
+                .get_global_keyed_state("r")
+                .await
+                .expect("should be able to get table");
+            recovery_state
+                .insert(ctx.task_info.task_index as usize, checkpoint)
+                .await;
+
+            // Still need to insert empty "p" data for non-Delta commit path compatibility
+            ctx.table_manager
+                .insert_committing_data("p", bincode::encode_to_vec(Vec::<FileToCommit>::new(), bincode_config::standard()).unwrap())
+                .await;
+
+            maybe_cause_failure("after_checkpoint");
+            return Ok(());
+        }
+
+        // Non-Delta mode: existing logic
         // if stopping, close all open files
         if barrier.then_stop {
             let pending = self.upload.pending_uploads.lock().await;
@@ -797,210 +988,47 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
     ) -> DataflowResult<()> {
         maybe_cause_failure("commit_start");
 
-        // upload single files in PerSubtask mode
-        let mut uploads = FuturesUnordered::new();
-        for pending in self.active.pending_local_commits.drain(..) {
-            uploads.push(pending.finalize());
-        }
-
-        while let Some(result) = uploads.next().await {
-            let _ = result?;
-        }
-
-        if ctx.task_info.task_index == 0 {
-            let files_to_commit: Vec<_> = commit_data
-                .get("p")
+        if self.is_delta_write_mode() && ctx.task_info.task_index == 0 {
+            // Delta WriteBuilder mode: deserialize batches from all subtasks and write via WriteBuilder
+            let all_decoded: Vec<(Option<String>, RecordBatch)> = commit_data
+                .get("d")
                 .ok_or_else(|| {
                     DataflowError::StateError(StateError::NoRegisteredTable {
-                        table: "p".to_string(),
+                        table: "d".to_string(),
                     })
                 })?
                 .values()
                 .flat_map(|serialized| {
-                    let v: Vec<FileToCommit> =
+                    let entries: Vec<DeltaBatchCommitData> =
                         bincode::decode_from_slice(serialized, bincode_config::standard())
                             .unwrap()
                             .0;
-                    v
+                    entries
+                        .into_iter()
+                        .map(|e| (e.table_name, decode_batch_from_ipc(&e.ipc_data)))
                 })
                 .collect();
 
-            // Separate single files (already uploaded) from multipart files (need finalization)
-            let mut finished_files = vec![];
-            let mut multipart_files = vec![];
+            if !all_decoded.is_empty() {
+                let partition_cols = self.context.as_ref().unwrap().partition_fields.clone();
 
-            for file in files_to_commit {
-                debug!(path = ?file.path, data = ?file.typ, "Processing file for commit");
-
-                match file.typ {
-                    checkpoint::FileToCommitType::Single { total_size } => {
-                        // Single files are already uploaded during checkpoint,
-                        // just add them directly to finished_files
-                        finished_files.push(FinishedFile {
-                            filename: file.path,
-                            // unused, retained for backwards compatibility
-                            partition: None,
-                            size: total_size,
-                            metadata: file.iceberg_metadata,
-                        });
-                    }
-                    checkpoint::FileToCommitType::Multipart { .. } => {
-                        multipart_files.push(file);
-                    }
-                }
-            }
-
-            // Finalize multipart uploads
-            let mut futures = FuturesUnordered::new();
-            let mut files = HashMap::new();
-            for file in multipart_files {
-                let mut file: OpenFile<BBW> = OpenFile::from_commit(
-                    file,
-                    self.context.as_ref().unwrap().storage_provider.clone(),
-                    &self.config,
-                    self.event_logger.clone(),
-                )?;
-                futures.push(file.finalize()?);
-                files.insert(file.path.clone(), file);
-            }
-
-            // wait for multipart files to be finalized
-            while let Some(event) = futures.next().await {
-                let event = event?;
-                let file = files.get_mut(&event.path).ok_or_else(|| {
-                    connector_err!(
-                        Internal,
-                        WithBackoff,
-                        "received file event for unknown file during committing: {}",
-                        event.path
-                    )
-                })?;
-                futures.extend(file.handle_event(event.data)?);
-            }
-
-            maybe_cause_failure("commit_middle");
-
-            // Add finalized multipart files to finished_files
-            for f in files.into_values() {
-                let filename = f.path.to_string();
-                let (total_size, metadata) = f.metadata_for_closed()?;
-
-                finished_files.push(FinishedFile {
-                    filename,
-                    partition: None,
-                    size: total_size,
-                    metadata,
-                })
-            }
-
-            // finally, commit them if we're using a table format
-            match &mut self.context.as_mut().unwrap().commit_state {
-                CommitState::DeltaLake {
-                    last_version,
-                    table,
-                } => {
-                    if let Some(new_version) = commit_files_to_delta(
-                        &finished_files,
+                match &mut self.context.as_mut().unwrap().commit_state {
+                    CommitState::DeltaLake {
+                        last_version,
                         table,
-                        *last_version,
-                    )
-                        .await
-                        .map_err(
-                            |e| connector_err!(External, WithBackoff, source: e, "failed to commit to delta"),
-                        )? {
-                        *last_version = new_version;
-                    }
-                }
-                CommitState::DeltaLakeMulti {
-                    tables,
-                    base_path,
-                    storage_options,
-                    schema,
-                } => {
-                    // Group finished files by table name (first path component)
-                    let mut table_files: HashMap<String, Vec<FinishedFile>> = HashMap::new();
-                    for file in finished_files.iter() {
-                        let table_name = file
-                            .filename
-                            .split('/')
-                            .next()
-                            .unwrap_or("unknown")
-                            .to_string();
-                        table_files
-                            .entry(table_name)
-                            .or_default()
-                            .push(FinishedFile {
-                                // Strip the table_name prefix from the filename
-                                // so the path is relative to the table root
-                                filename: file
-                                    .filename
-                                    .strip_prefix(&format!(
-                                        "{}/",
-                                        file.filename.split('/').next().unwrap_or("")
-                                    ))
-                                    .unwrap_or(&file.filename)
-                                    .to_string(),
-                                partition: file.partition.clone(),
-                                size: file.size,
-                                metadata: file.metadata.clone(),
-                            });
-                    }
-
-                    let mut commit_count = 0;
-                    for (table_name, files) in table_files.iter() {
-                        if files.is_empty() {
-                            continue;
-                        }
-
-                        // Get or create the DeltaTable entry for this table
-                        if !tables.contains_key(table_name) {
-                            let table_url =
-                                format!("{base_path}/{table_name}");
-                            let table_provider =
-                                StorageProvider::for_url_with_options(
-                                    &table_url,
-                                    storage_options.clone(),
-                                )
-                                .await
-                                .map_err(|e| {
-                                    map_storage_error(e)
-                                })?;
-                            let delta_table =
-                                load_or_create_table(&table_provider, schema)
-                                    .await
-                                    .map_err(|e| {
-                                        connector_err!(
-                                            External,
-                                            WithBackoff,
-                                            source: e,
-                                            "failed to load or create delta table '{}'",
-                                            table_name
-                                        )
-                                    })?;
-                            tables.insert(
-                                table_name.clone(),
-                                DeltaTableEntry {
-                                    table_path: table_name.clone(),
-                                    last_version: -1,
-                                    table: Box::new(delta_table),
-                                    files: vec![],
-                                },
-                            );
-                        }
-
-                        let entry = tables.get_mut(table_name).unwrap();
+                    } => {
+                        let batches: Vec<RecordBatch> =
+                            all_decoded.into_iter().map(|(_, b)| b).collect();
 
                         info!(
-                            "Committing {} files to Delta table '{}' at {}",
-                            files.len(),
-                            table_name,
-                            entry.table_path
+                            "Writing {} batches to Delta table via WriteBuilder",
+                            batches.len()
                         );
 
-                        if let Some(new_version) = commit_files_to_delta(
-                            files,
-                            &mut entry.table,
-                            entry.last_version,
+                        let new_version = write_batches_to_delta(
+                            table,
+                            batches,
+                            partition_cols,
                         )
                         .await
                         .map_err(|e| {
@@ -1008,23 +1036,204 @@ impl<BBW: BatchBufferingWriter + Send + 'static> ArrowOperator for FileSystemSin
                                 External,
                                 WithBackoff,
                                 source: e,
-                                "failed to commit to delta table '{}'",
-                                table_name
+                                "failed to write batches to delta"
                             )
-                        })? {
-                            entry.last_version = new_version;
-                        }
-                        commit_count += 1;
+                        })?;
+                        *last_version = new_version;
                     }
-                    info!("Committed to {} Delta tables", commit_count);
+                    CommitState::DeltaLakeMulti {
+                        tables,
+                        base_path,
+                        storage_options,
+                        schema,
+                    } => {
+                        // Group by table name
+                        let mut table_batches: HashMap<String, Vec<RecordBatch>> = HashMap::new();
+                        for (name, batch) in all_decoded {
+                            table_batches
+                                .entry(name.unwrap_or_else(|| "unknown".to_string()))
+                                .or_default()
+                                .push(batch);
+                        }
+
+                        let mut commit_count = 0;
+                        for (table_name, batches) in table_batches {
+                            // Get or create the DeltaTable entry for this table
+                            if !tables.contains_key(&table_name) {
+                                let table_url = format!("{base_path}/{table_name}");
+                                let table_provider =
+                                    StorageProvider::for_url_with_options(
+                                        &table_url,
+                                        storage_options.clone(),
+                                    )
+                                    .await
+                                    .map_err(map_storage_error)?;
+                                let delta_table =
+                                    load_or_create_table(&table_provider, schema, partition_cols.clone())
+                                        .await
+                                        .map_err(|e| {
+                                            connector_err!(
+                                                External,
+                                                WithBackoff,
+                                                source: e,
+                                                "failed to load or create delta table '{}'",
+                                                table_name
+                                            )
+                                        })?;
+                                tables.insert(
+                                    table_name.clone(),
+                                    DeltaTableEntry {
+                                        table_path: table_name.clone(),
+                                        last_version: -1,
+                                        table: Box::new(delta_table),
+                                        files: vec![],
+                                    },
+                                );
+                            }
+
+                            let entry = tables.get_mut(&table_name).unwrap();
+
+                            info!(
+                                "Writing {} batches to Delta table '{}' via WriteBuilder",
+                                batches.len(),
+                                table_name
+                            );
+
+                            let new_version = write_batches_to_delta(
+                                &mut entry.table,
+                                batches,
+                                partition_cols.clone(),
+                            )
+                            .await
+                            .map_err(|e| {
+                                connector_err!(
+                                    External,
+                                    WithBackoff,
+                                    source: e,
+                                    "failed to write batches to delta table '{}'",
+                                    table_name
+                                )
+                            })?;
+                            entry.last_version = new_version;
+                            commit_count += 1;
+                        }
+                        info!("Committed to {} Delta tables via WriteBuilder", commit_count);
+                    }
+                    _ => unreachable!("is_delta_write_mode() returned true but commit_state is not Delta"),
                 }
-                CommitState::Iceberg(table) => {
-                    table.commit(epoch, &finished_files).await.map_err(
-                        |e| connector_err!(External, WithBackoff, source: e, "failed to commit to iceberg"),
+            }
+        } else if !self.is_delta_write_mode() {
+            // Non-Delta mode: existing logic
+
+            // upload single files in PerSubtask mode
+            let mut uploads = FuturesUnordered::new();
+            for pending in self.active.pending_local_commits.drain(..) {
+                uploads.push(pending.finalize());
+            }
+
+            while let Some(result) = uploads.next().await {
+                let _ = result?;
+            }
+
+            if ctx.task_info.task_index == 0 {
+                let files_to_commit: Vec<_> = commit_data
+                    .get("p")
+                    .ok_or_else(|| {
+                        DataflowError::StateError(StateError::NoRegisteredTable {
+                            table: "p".to_string(),
+                        })
+                    })?
+                    .values()
+                    .flat_map(|serialized| {
+                        let v: Vec<FileToCommit> =
+                            bincode::decode_from_slice(serialized, bincode_config::standard())
+                                .unwrap()
+                                .0;
+                        v
+                    })
+                    .collect();
+
+                // Separate single files (already uploaded) from multipart files (need finalization)
+                let mut finished_files = vec![];
+                let mut multipart_files = vec![];
+
+                for file in files_to_commit {
+                    debug!(path = ?file.path, data = ?file.typ, "Processing file for commit");
+
+                    match file.typ {
+                        checkpoint::FileToCommitType::Single { total_size } => {
+                            // Single files are already uploaded during checkpoint,
+                            // just add them directly to finished_files
+                            finished_files.push(FinishedFile {
+                                filename: file.path,
+                                // unused, retained for backwards compatibility
+                                partition: None,
+                                size: total_size,
+                                metadata: file.iceberg_metadata,
+                            });
+                        }
+                        checkpoint::FileToCommitType::Multipart { .. } => {
+                            multipart_files.push(file);
+                        }
+                    }
+                }
+
+                // Finalize multipart uploads
+                let mut futures = FuturesUnordered::new();
+                let mut files = HashMap::new();
+                for file in multipart_files {
+                    let mut file: OpenFile<BBW> = OpenFile::from_commit(
+                        file,
+                        self.context.as_ref().unwrap().storage_provider.clone(),
+                        &self.config,
+                        self.event_logger.clone(),
                     )?;
+                    futures.push(file.finalize()?);
+                    files.insert(file.path.clone(), file);
                 }
-                CommitState::VanillaParquet => {
-                    // Nothing to do
+
+                // wait for multipart files to be finalized
+                while let Some(event) = futures.next().await {
+                    let event = event?;
+                    let file = files.get_mut(&event.path).ok_or_else(|| {
+                        connector_err!(
+                            Internal,
+                            WithBackoff,
+                            "received file event for unknown file during committing: {}",
+                            event.path
+                        )
+                    })?;
+                    futures.extend(file.handle_event(event.data)?);
+                }
+
+                maybe_cause_failure("commit_middle");
+
+                // Add finalized multipart files to finished_files
+                for f in files.into_values() {
+                    let filename = f.path.to_string();
+                    let (total_size, metadata) = f.metadata_for_closed()?;
+
+                    finished_files.push(FinishedFile {
+                        filename,
+                        partition: None,
+                        size: total_size,
+                        metadata,
+                    })
+                }
+
+                // finally, commit them if we're using a table format
+                match &mut self.context.as_mut().unwrap().commit_state {
+                    CommitState::Iceberg(table) => {
+                        table.commit(epoch, &finished_files).await.map_err(
+                            |e| connector_err!(External, WithBackoff, source: e, "failed to commit to iceberg"),
+                        )?;
+                    }
+                    CommitState::VanillaParquet => {
+                        // Nothing to do
+                    }
+                    _ => {
+                        // DeltaLake/DeltaLakeMulti handled above in delta write mode
+                    }
                 }
             }
         }

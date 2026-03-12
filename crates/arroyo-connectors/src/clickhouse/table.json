@@ -1,0 +1,25 @@
+{
+    "type": "object",
+    "title": "ClickHouseTable",
+    "properties": {
+        "tableName": {
+            "title": "Table Name",
+            "type": "string",
+            "description": "The target ClickHouse table name for INSERT",
+            "examples": ["sensor_data"]
+        },
+        "batchSize": {
+            "title": "Batch Size",
+            "type": "integer",
+            "description": "Maximum number of rows to buffer before flushing (default: 10000)"
+        },
+        "batchFlushIntervalMs": {
+            "title": "Batch Flush Interval (ms)",
+            "type": "integer",
+            "description": "Maximum time in milliseconds to wait before flushing a batch (default: 1000)"
+        }
+    },
+    "required": [
+        "tableName"
+    ]
+}

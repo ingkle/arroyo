@@ -8,7 +8,7 @@ use rdkafka::{ClientConfig, Message as KMessage, Offset, TopicPartitionList};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::select;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
@@ -403,6 +403,13 @@ impl KafkaSourceFunc {
                                             );
                                         }
                                     }
+                                }
+                                // Un-idle when partitions are assigned (fixes race with initial 5s idle check)
+                                if !partitions.is_empty() {
+                                    info!("Partitions assigned, resuming from idle");
+                                    collector
+                                        .broadcast(SignalMessage::Watermark(Watermark::EventTime(SystemTime::now())))
+                                        .await;
                                 }
                             }
                             RebalanceEvent::Revoke(partitions) => {

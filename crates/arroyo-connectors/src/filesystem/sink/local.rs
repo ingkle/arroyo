@@ -268,7 +268,7 @@ impl<V: LocalWriter + Send + 'static> TwoPhaseCommitter for LocalFileSystemWrite
             TableFormat::Delta => CommitState::DeltaLake {
                 last_version: -1,
                 table: Box::new(
-                    load_or_create_table(&storage_provider, &schema.schema_without_timestamp())
+                    load_or_create_table(&storage_provider, &schema.schema_without_timestamp(), vec![])
                         .await?,
                 ),
             },
