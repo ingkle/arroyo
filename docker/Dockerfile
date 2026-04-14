@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.4
-
 FROM 192.168.200.11:5000/library/rust:1-bookworm AS builder
 WORKDIR /app
 ARG GIT_SHA
@@ -57,9 +55,7 @@ ENV LIBRARY_PATH=/usr/local/lib \
     RUSTFLAGS="-L native=/usr/local/lib -Clink-arg=-Wl,-rpath,/usr/local/lib"
 
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=${TARGETPLATFORM}-${PROFILE} \
-      --mount=type=cache,target=/app/target,id=${TARGETPLATFORM}-${PROFILE} \
-    service postgresql start && \
+RUN service postgresql start && \
     sudo -u postgres psql -c "CREATE USER arroyo WITH PASSWORD 'arroyo' SUPERUSER;" && \
     sudo -u postgres createdb arroyo && \
     refinery migrate -c refinery.toml -p crates/arroyo-api/migrations && \
