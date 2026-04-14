@@ -84,10 +84,11 @@ impl KubernetesScheduler {
         labels.insert(RUN_ID_LABEL.to_string(), format!("{}", req.run_id));
         labels.insert(JOB_NAME_LABEL.to_string(), req.name.clone());
 
+        let pipeline_slug = req.name.to_ascii_lowercase().replace('_', "-");
         let pod_name = format!(
             "{}-{}-{}-{}",
             c.worker.name(),
-            req.job_id.to_ascii_lowercase().replace('_', "-"),
+            pipeline_slug,
             req.run_id,
             number
         );
