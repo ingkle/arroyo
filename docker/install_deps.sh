@@ -2,6 +2,8 @@
 
 set -e
 
+NEXUS_FILES="http://192.168.200.11:8081/repository/offline-files/arroyo"
+
 # Install arch specific build dependencies
 echo env
 if [ "$(uname -m)" = "x86_64" ]; then
@@ -17,8 +19,8 @@ else
   exit 1;
 fi
 
-# Install Python 3.12 (manually, as no bookworm package for 3.12)
-curl -OL https://github.com/indygreg/python-build-standalone/releases/download/20240814/cpython-3.12.5+20240814-${PY_ARCH}-unknown-linux-gnu-install_only.tar.gz 
+# Install Python 3.12
+curl -OL ${NEXUS_FILES}/cpython-3.12.5-${PY_ARCH}-linux.tar.gz
 tar xvfz cpython*.tar.gz
 cp -r python/bin/* /usr/local/bin/
 cp -r python/include/* /usr/local/include/
@@ -27,14 +29,14 @@ cp -r python/share/* /usr/local/share/
 ldconfig
 
 # Install mold
-curl -OL https://github.com/rui314/mold/releases/download/v1.11.0/mold-1.11.0-${MOLD_ARCH}-linux.tar.gz
+curl -OL ${NEXUS_FILES}/mold-1.11.0-${MOLD_ARCH}-linux.tar.gz
 tar xvfz mold*.tar.gz
 mv mold*-linux/bin/* /usr/bin
 mv mold*-linux/libexec/* /usr/libexec
 rm -rf mold*
 
 # Install protoc
-curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v21.8/protoc-21.8-linux-${PROTO_ARCH}.zip
+curl -OL ${NEXUS_FILES}/protoc-21.8-linux-${PROTO_ARCH}.zip
 unzip protoc*.zip
 mv bin/protoc /usr/local/bin
 rm -rf protoc*.zip

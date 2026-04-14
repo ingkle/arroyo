@@ -1,33 +1,45 @@
 # syntax=docker/dockerfile:1.4
 
-FROM rust:1-bookworm AS builder
+FROM 192.168.200.11:5000/library/rust:1-bookworm AS builder
 WORKDIR /app
 ARG GIT_SHA
 ARG TARGETPLATFORM
 ARG PROFILE=release
 ARG FEATURES=python
 
-RUN apt-get update && \
+RUN rm -f /etc/apt/sources.list.d/* && \
+    . /etc/os-release && \
+    echo "deb [trusted=yes] http://192.168.200.11:8081/repository/apt-debian-proxy ${VERSION_CODENAME} main" > /etc/apt/sources.list && \
+    apt-get update && \
     apt-get -y install curl pkg-config unzip build-essential libssl-dev openssl \
-    cmake clang wget postgresql postgresql-client supervisor sudo bash libsasl2-dev && \
-    cargo install refinery_cli
+    cmake clang wget postgresql postgresql-client supervisor sudo bash libsasl2-dev nodejs npm
 
-# Install Python (manually, as no bookworm package for 3.12)
+# Cargo registry → Nexus proxy
+RUN mkdir -p /usr/local/cargo && cat > /usr/local/cargo/config.toml << 'EOF'
+[source.crates-io]
+replace-with = "nexus"
 
+[source.nexus]
+registry = "sparse+http://192.168.200.11:8081/repository/cargo-index-proxy/"
 
-# Install node & pnpm
-RUN mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_18.x nodistro main" |  \
-      sudo tee /etc/apt/sources.list.d/nodesource.list && \
-    apt-get update && apt-get install -y nodejs && \
-    curl -fsSL https://get.pnpm.io/install.sh | env PNPM_VERSION=9.0.6 SHELL=$(which bash) bash -
+[net]
+git-fetch-with-cli = true
+
+[http]
+cainfo = ""
+EOF
+
+RUN cargo install refinery_cli
+
+# Install pnpm via npm
+RUN npm config set registry http://192.168.200.11:8081/repository/npm-proxy/ && \
+    npm install -g pnpm@9.0.6
 
 COPY docker/install_deps.sh /install_deps.sh
 RUN sh /install_deps.sh
 
 COPY webui/pnpm-lock.yaml webui/pnpm-lock.yaml
-RUN bash -c "cd webui && source ~/.bashrc && /root/.local/share/pnpm/pnpm fetch"
+RUN cd webui && pnpm fetch
 
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
@@ -37,7 +49,7 @@ COPY webui webui
 
 # set git hash
 ENV VERGEN_GIT_SHA=$GIT_SHA
-RUN bash -c "cd webui && source ~/.bashrc && /root/.local/share/pnpm/pnpm install && /root/.local/share/pnpm/pnpm build"
+RUN cd webui && pnpm install && pnpm build
 
 COPY docker/refinery.toml refinery.toml
 
@@ -55,10 +67,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=${TARGETPLATFORM}-${P
     mv target/*/arroyo /arroyo
 
 
-FROM debian:bookworm-slim as arroyo
+FROM 192.168.200.11:5000/library/debian:bookworm-slim as arroyo
 WORKDIR /app
 
-RUN apt-get update && \
+RUN rm -f /etc/apt/sources.list.d/* && \
+    . /etc/os-release && \
+    echo "deb [trusted=yes] http://192.168.200.11:8081/repository/apt-debian-proxy ${VERSION_CODENAME} main" > /etc/apt/sources.list && \
+    apt-get update && \
     apt-get -y install libsasl2-2 ca-certificates curl pkg-config && \
     mkdir /config
 
@@ -73,7 +88,7 @@ RUN cp -r /python/bin/* /usr/local/bin/ && \
     cp -r /python/share/* /usr/local/share/ && \
     rm -rf /python && \
     ldconfig && \
-    pip3 install redis
+    pip3 install --index-url http://192.168.200.11:8081/repository/pypi-proxy/simple/ --trusted-host 192.168.200.11 redis
 
 ENV INSTALL_RUSTC=true \
     INSTALL_CLANG=true \
@@ -84,9 +99,12 @@ EXPOSE 5115
 ENTRYPOINT [ "/app/arroyo" ]
 CMD ["cluster"]
 
-FROM rust:slim-bookworm AS arroyo-full
+FROM 192.168.200.11:5000/library/rust:slim-bookworm AS arroyo-full
 WORKDIR /app
-RUN apt-get update && \
+RUN rm -f /etc/apt/sources.list.d/* && \
+    . /etc/os-release && \
+    echo "deb [trusted=yes] http://192.168.200.11:8081/repository/apt-debian-proxy ${VERSION_CODENAME} main" > /etc/apt/sources.list && \
+    apt-get update && \
     apt-get -y install libsasl2-2 ca-certificates curl pkg-config
 
 ENV ARROYO__API__RUN_HTTP_PORT=5115
