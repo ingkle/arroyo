@@ -72,7 +72,8 @@ RUN cp -r /python/bin/* /usr/local/bin/ && \
     cp -r /python/lib/* /usr/local/lib/ && \
     cp -r /python/share/* /usr/local/share/ && \
     rm -rf /python && \
-    ldconfig
+    ldconfig && \
+    pip3 install redis
 
 ENV INSTALL_RUSTC=true \
     INSTALL_CLANG=true \
