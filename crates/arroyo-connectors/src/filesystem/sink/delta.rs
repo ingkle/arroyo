@@ -17,6 +17,8 @@ use deltalake::{
 
 use deltalake::kernel::transaction::CommitBuilder;
 use deltalake::operations::write::{SchemaMode, WriteBuilder};
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 use itertools::Itertools;
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -202,10 +204,15 @@ pub(crate) async fn write_batches_to_delta(
     batches: Vec<RecordBatch>,
     partition_columns: Vec<String>,
 ) -> Result<i64> {
+    let writer_props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .build();
+
     let mut builder = WriteBuilder::new(table.log_store(), table.snapshot().ok().cloned())
         .with_input_batches(batches)
         .with_schema_mode(SchemaMode::Merge)
-        .with_save_mode(SaveMode::Append);
+        .with_save_mode(SaveMode::Append)
+        .with_writer_properties(writer_props);
 
     if !partition_columns.is_empty() {
         builder = builder.with_partition_columns(partition_columns);
