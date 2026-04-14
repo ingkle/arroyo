@@ -13,19 +13,7 @@ RUN rm -f /etc/apt/sources.list.d/* && \
     cmake clang wget postgresql postgresql-client supervisor sudo bash libsasl2-dev nodejs npm
 
 # Cargo registry → Nexus proxy
-RUN mkdir -p /usr/local/cargo && cat > /usr/local/cargo/config.toml << 'EOF'
-[source.crates-io]
-replace-with = "nexus"
-
-[source.nexus]
-registry = "sparse+http://192.168.200.11:8081/repository/cargo-index-proxy/"
-
-[net]
-git-fetch-with-cli = true
-
-[http]
-cainfo = ""
-EOF
+COPY docker/cargo-config.toml /usr/local/cargo/config.toml
 
 RUN cargo install refinery_cli
 

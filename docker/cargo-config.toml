@@ -1,0 +1,8 @@
+[source.crates-io]
+replace-with = "nexus"
+
+[source.nexus]
+registry = "sparse+http://192.168.200.11:8081/repository/cargo-index-proxy/"
+
+[net]
+git-fetch-with-cli = true
