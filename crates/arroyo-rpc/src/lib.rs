@@ -1049,7 +1049,10 @@ pub async fn controller_client(
 ) -> Result<ControllerGrpcClient<Channel>> {
     let endpoint = config().controller_endpoint();
     let channel = connect_grpc(our_name, endpoint, our_tls, &config().controller.tls).await?;
-    Ok(ControllerGrpcClient::new(channel))
+    let max_grpc_msg = config().controller.max_grpc_message_size;
+    Ok(ControllerGrpcClient::new(channel)
+        .max_decoding_message_size(max_grpc_msg)
+        .max_encoding_message_size(max_grpc_msg))
 }
 
 pub fn local_address(bind_address: IpAddr) -> String {

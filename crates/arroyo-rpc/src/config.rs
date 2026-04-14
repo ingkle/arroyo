@@ -24,6 +24,11 @@ use std::time::Duration;
 use url::Url;
 
 const DEFAULT_CONFIG: &str = include_str!("../default.toml");
+const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64MB
+
+fn default_max_grpc_message_size() -> usize {
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE
+}
 const SENSITIVE_MASK: &str = "*********";
 
 static CONFIG: ArcSwapOption<Config> = ArcSwapOption::const_empty();
@@ -359,6 +364,10 @@ pub struct ControllerConfig {
     /// TLS configuration for controller gRPC service
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+
+    /// Maximum gRPC message size in bytes (default: 64MB)
+    #[serde(default = "default_max_grpc_message_size")]
+    pub max_grpc_message_size: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -434,6 +443,10 @@ pub struct WorkerConfig {
     /// TLS configuration for worker TCP shuffling
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+
+    /// Maximum gRPC message size in bytes (default: 64MB)
+    #[serde(default = "default_max_grpc_message_size")]
+    pub max_grpc_message_size: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -247,6 +247,7 @@ impl WorkerServer {
         let job_id = self.job_id.clone();
         let run_id = self.run_id;
 
+        let max_grpc_msg = config.worker.max_grpc_message_size;
         self.shutdown_guard
             .child("grpc")
             .into_spawn_task(wrap_start(
@@ -259,12 +260,20 @@ impl WorkerServer {
                     );
                     arroyo_server_common::grpc_server_with_tls(tls)
                         .await?
-                        .add_service(WorkerGrpcServer::new(self))
+                        .add_service(
+                            WorkerGrpcServer::new(self)
+                                .max_decoding_message_size(max_grpc_msg)
+                                .max_encoding_message_size(max_grpc_msg),
+                        )
                         .serve_with_incoming(TcpListenerStream::new(listener))
                 } else {
                     info!("Started worker-rpc for {} on {}", self.name, local_addr);
                     arroyo_server_common::grpc_server()
-                        .add_service(WorkerGrpcServer::new(self))
+                        .add_service(
+                            WorkerGrpcServer::new(self)
+                                .max_decoding_message_size(max_grpc_msg)
+                                .max_encoding_message_size(max_grpc_msg),
+                        )
                         .serve_with_incoming(TcpListenerStream::new(listener))
                 },
             ));

@@ -678,9 +678,12 @@ impl ControllerServer {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
 
+        let max_grpc_msg = config.controller.max_grpc_message_size;
         let service = ControllerGrpcServer::new(self.clone())
             .send_compressed(CompressionEncoding::Zstd)
-            .accept_compressed(CompressionEncoding::Zstd);
+            .accept_compressed(CompressionEncoding::Zstd)
+            .max_decoding_message_size(max_grpc_msg)
+            .max_encoding_message_size(max_grpc_msg);
 
         self.start_updater(guard.child("updater"));
 

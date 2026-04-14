@@ -29,6 +29,7 @@ http-port = 5115
 bind-address = "0.0.0.0"
 rpc-port = 5116
 scheduler = "process"
+max-grpc-message-size = 67108864  # 64MB
 
 [compiler]
 bind-address = "0.0.0.0"
@@ -44,6 +45,7 @@ rpc-port = 0
 data-port = 0
 task-slots = 16
 queue-size = 8192
+max-grpc-message-size = 67108864  # 64MB
 
 [node]
 bind-address = "0.0.0.0"

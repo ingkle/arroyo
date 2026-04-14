@@ -133,6 +133,7 @@ async fn handle_worker_connect<'a>(
             );
 
             let connects = worker_connects;
+            let max_grpc_msg = config().worker.max_grpc_message_size;
 
             handles.push(tokio::spawn(async move {
                 info!(
@@ -159,7 +160,12 @@ async fn handle_worker_connect<'a>(
                         Ok(channel) => {
                             {
                                 let mut connects = connects.lock().await;
-                                connects.insert(worker_id, WorkerGrpcClient::new(channel));
+                                connects.insert(
+                                                    worker_id,
+                                                    WorkerGrpcClient::new(channel)
+                                                        .max_decoding_message_size(max_grpc_msg)
+                                                        .max_encoding_message_size(max_grpc_msg),
+                                                );
                             }
                             return;
                         }
