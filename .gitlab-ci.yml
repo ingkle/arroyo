@@ -1,0 +1,82 @@
+stages:
+  - build
+  - deploy
+  - notify
+
+variables:
+  IMAGE_NAME: "ingkle/arroyo-platform"
+  APP_NAME: "arroyo"
+  VAULT_ADDR: "http://vault.vault.svc.cluster.local:8200"
+  DEVOPS_REPO: "http://root:glpat-offline-deploy-token1234@gitlab-webservice-default.gitlab.svc:8181/root/devops.git"
+
+build-and-push:
+  stage: build
+  image: 192.168.200.11:5000/library/gitlab-runner:v1.0.0
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  timeout: 3h
+  before_script:
+    - mkdir -p /etc/docker && echo '{"insecure-registries":["harbor.harbor.svc.cluster.local","192.168.200.11:5000","192.168.200.60:30410"]}' > /etc/docker/daemon.json && dockerd &>/dev/null &
+    - sleep 3
+    - docker info > /dev/null 2>&1 && echo "Docker daemon ready" || { echo "Docker daemon failed"; exit 1; }
+    - export HARBOR_USERNAME="admin"
+    - export HARBOR_PASSWORD="ingkle1234"
+    - echo "$HARBOR_PASSWORD" | docker login $REGISTRY -u $HARBOR_USERNAME --password-stdin
+  script:
+    - export TAG=$(git rev-parse --short HEAD)
+    - echo "Building ${REGISTRY}/${IMAGE_NAME}:${TAG}"
+    - DOCKER_BUILDKIT=0 docker build --network host --target arroyo -t ${REGISTRY}/${IMAGE_NAME}:${TAG} -f docker/Dockerfile .
+    - docker push ${REGISTRY}/${IMAGE_NAME}:${TAG}
+    - docker tag ${REGISTRY}/${IMAGE_NAME}:${TAG} ${REGISTRY}/${IMAGE_NAME}:latest
+    - docker push ${REGISTRY}/${IMAGE_NAME}:latest
+    - echo "TAG=${TAG}" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  only:
+    - master
+
+update-manifest:
+  stage: deploy
+  image: 192.168.200.11:5000/library/gitlab-runner:v1.0.0
+  needs:
+    - job: build-and-push
+      artifacts: true
+  script:
+    - git clone "${DEVOPS_REPO}" /tmp/devops
+    - 'yq -i ".spec.template.spec.containers[0].image = \"${REGISTRY}/${IMAGE_NAME}:${TAG}\"" /tmp/devops/sites/offline/manifests/stream-platform/arroyo/deployment.yaml || true'
+    - cd /tmp/devops
+    - git add -A
+    - 'git diff --cached --quiet || git -c user.name="ci" -c user.email="ci@offline" commit -m "deploy: arroyo:${TAG}"'
+    - git push origin master || true
+  only:
+    - master
+
+notify-success:
+  stage: notify
+  image: 192.168.200.11:5000/library/gitlab-runner:v1.0.0
+  needs:
+    - job: build-and-push
+      artifacts: true
+    - job: update-manifest
+  script:
+    - export SLACK_WEBHOOK=$(curl -sf -H "X-Vault-Token:${VAULT_TOKEN}" ${VAULT_ADDR}/v1/secret/data/slack/cicd | jq -r '.data.data.webhook_url') || true
+    - |
+      [ -n "$SLACK_WEBHOOK" ] && curl -sf -X POST $SLACK_WEBHOOK -H 'Content-type: application/json' -d "{
+        \"text\": \":white_check_mark: *빌드+배포 성공* | \`${APP_NAME}\`\n:harbor: Harbor → :kubernetes: 60 클러스터\n*사용자*: ${GITLAB_USER_NAME}\n*이미지*: \`${REGISTRY}/${IMAGE_NAME}:${TAG}\`\n*커밋*: \`${CI_COMMIT_SHORT_SHA}\` ${CI_COMMIT_MESSAGE}\n*시간*: $(TZ=Asia/Seoul date '+%H:%M:%S KST')\"
+      }" || echo "Slack notification skipped (webhook not configured)"
+  only:
+    - master
+
+notify-failure:
+  stage: notify
+  image: 192.168.200.11:5000/library/gitlab-runner:v1.0.0
+  when: on_failure
+  script:
+    - export SLACK_WEBHOOK=$(curl -sf -H "X-Vault-Token:${VAULT_TOKEN}" ${VAULT_ADDR}/v1/secret/data/slack/cicd | jq -r '.data.data.webhook_url') || true
+    - |
+      [ -n "$SLACK_WEBHOOK" ] && curl -sf -X POST $SLACK_WEBHOOK -H 'Content-type: application/json' -d "{
+        \"text\": \":x: *빌드 실패* | \`${APP_NAME}\`\n*사용자*: ${GITLAB_USER_NAME}\n*커밋*: \`${CI_COMMIT_SHORT_SHA}\` ${CI_COMMIT_MESSAGE}\n*파이프라인*: ${CI_PIPELINE_URL}\n*시간*: $(TZ=Asia/Seoul date '+%H:%M:%S KST')\"
+      }" || echo "Slack notification skipped (webhook not configured)"
+  only:
+    - master
