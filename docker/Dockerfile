@@ -42,6 +42,9 @@ COPY docker/refinery.toml refinery.toml
 ENV LIBRARY_PATH=/usr/local/lib \
     RUSTFLAGS="-L native=/usr/local/lib -Clink-arg=-Wl,-rpath,/usr/local/lib"
 
+# GitLab 인증 (internal 미러 레포 git clone)
+RUN git config --global credential.helper store && \
+    echo "http://root:ingkle1234@192.168.200.60:30401" > /root/.git-credentials
 
 RUN service postgresql start && \
     sudo -u postgres psql -c "CREATE USER arroyo WITH PASSWORD 'arroyo' SUPERUSER;" && \
