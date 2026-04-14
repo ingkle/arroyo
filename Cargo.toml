@@ -85,21 +85,21 @@ debug = 1
 split-debuginfo = "unpacked"
 
 [patch.crates-io]
-typify = { git = 'https://github.com/ArroyoSystems/typify.git', branch = 'arroyo' }
-parquet = {git = 'https://github.com/ArroyoSystems/arrow-rs', branch = '55.2.0/parquet'}
-arrow-json = {git = 'https://github.com/ArroyoSystems/arrow-rs', branch = '55.2.0/json'}
-datafusion = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-common = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-execution = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-expr = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-physical-expr = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-physical-plan = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-proto = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-functions = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-functions-window = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+typify = { git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/typify.git', branch = 'arroyo' }
+parquet = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-rs', branch = '55.2.0/parquet'}
+arrow-json = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-rs', branch = '55.2.0/json'}
+datafusion = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-common = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-execution = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-expr = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-physical-expr = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-physical-plan = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-proto = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-functions = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-functions-window = {git = 'http://gitlab-webservice-default.gitlab.svc:8181/root/arrow-datafusion', branch = '48.0.1/arroyo'}
 
-sqlparser = { git = "https://github.com/ArroyoSystems/sqlparser-rs", branch = "0.55.0/arroyo" }
+sqlparser = { git = "http://gitlab-webservice-default.gitlab.svc:8181/root/sqlparser-rs", branch = "0.55.0/arroyo" }
 
-cornucopia_async = { git = "https://github.com/ArroyoSystems/cornucopia", branch = "sqlite" }
-cornucopia = { git = "https://github.com/ArroyoSystems/cornucopia", branch = "sqlite" }
-jiter = {git = "https://github.com/ArroyoSystems/jiter", branch = "disable_python" }
+cornucopia_async = { git = "http://gitlab-webservice-default.gitlab.svc:8181/root/cornucopia", branch = "sqlite" }
+cornucopia = { git = "http://gitlab-webservice-default.gitlab.svc:8181/root/cornucopia", branch = "sqlite" }
+jiter = {git = "http://gitlab-webservice-default.gitlab.svc:8181/root/jiter", branch = "disable_python" }
