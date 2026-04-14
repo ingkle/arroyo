@@ -2,7 +2,7 @@
 replace-with = "nexus"
 
 [source.nexus]
-registry = "sparse+http://192.168.200.11:8081/repository/cargo-index-proxy/"
+registry = "sparse+http://192.168.200.11:8081/repository/cargo-registry-group/"
 
 [net]
 git-fetch-with-cli = true
