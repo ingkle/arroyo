@@ -46,6 +46,9 @@ COPY docker/refinery.toml refinery.toml
 ENV LIBRARY_PATH=/usr/local/lib \
     RUSTFLAGS="-L native=/usr/local/lib -Clink-arg=-Wl,-rpath,/usr/local/lib"
 
+RUN mkdir -p /tmp/empty-swagger
+ENV SWAGGER_UI_OVERWRITE_FOLDER=/tmp/empty-swagger
+
 RUN service postgresql start && \
     sudo -u postgres psql -c "CREATE USER arroyo WITH PASSWORD 'arroyo' SUPERUSER;" && \
     sudo -u postgres createdb arroyo && \
