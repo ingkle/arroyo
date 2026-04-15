@@ -1,0 +1,86 @@
+[package]
+name = "fluvio"
+version = "0.24.4"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Fluvio Contributors <team@fluvio.io>"]
+categories = ["database"]
+keywords = ["streaming", "stream", "queue"]
+repository = "https://github.com/infinyon/fluvio"
+description = "The official Fluvio driver for Rust"
+readme = "README.md"
+
+[lib]
+name = "fluvio"
+path = "src/lib.rs"
+
+[features]
+default = ["openssl", "compress"]
+admin = ["fluvio-sc-schema/use_serde"]
+smartengine = ["fluvio-smartengine"]
+openssl = ["fluvio-future/openssl_tls"]
+rustls = ["fluvio-future/rust_tls"]
+compress = ["fluvio-compression/compress", "fluvio-protocol/compress"]
+nightly = []
+unstable = []
+
+[dependencies]
+async-channel = { workspace = true }
+async-lock = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+cfg-if = { workspace = true }
+derive_builder = { workspace = true }
+event-listener = { workspace = true }
+futures-util = { workspace = true }
+once_cell = { workspace = true }
+serde = { workspace = true, features = ['derive'] }
+tokio = { workspace = true, features = ["macros", "sync"] }
+thiserror = { workspace = true }
+semver = { workspace = true }
+pin-project = { workspace = true }
+siphasher = { workspace = true }
+
+
+toml = { workspace = true, features = ["display", "preserve_order"] }
+tracing = { workspace = true }
+
+# Fluvio dependencies
+fluvio-future = { workspace = true, features = [
+    "task",
+    "task_unstable",
+    "retry",
+    "sync",
+] }
+fluvio-types = { workspace = true, features = ["events"] }
+fluvio-sc-schema = { workspace = true }
+fluvio-socket = { workspace = true }
+fluvio-protocol = { workspace = true, features = ["record", "api"] }
+fluvio-compression = { workspace = true, default-features = false }
+fluvio-smartmodule = { workspace = true }
+fluvio-stream-dispatcher = { workspace = true, features = ["local"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
+fluvio-smartengine = { workspace = true, features = [
+    "engine",
+], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+fluvio-spu-schema = { workspace = true, features = ["file"] }
+[target.'cfg(windows)'.dependencies]
+fluvio-spu-schema = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = { workspace = true }
+fluvio-spu-schema = { workspace = true }
+chrono = { workspace = true, features = ["wasmbind", "clock"] }
+
+[dev-dependencies]
+async-std = { workspace = true }
+fluvio-future = { workspace = true, features = ["io", "fixture"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+fluvio_ws_stream_wasm = { workspace = true }

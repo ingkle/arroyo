@@ -1,0 +1,100 @@
+[package]
+name = "json-subscriber"
+description = "Customizable layer and subscriber for `tracing` that emits logs in JSON"
+version = "0.2.6"
+edition = "2021"
+rust-version = "1.75"
+homepage = "https://github.com/mladedav/json-subscriber"
+keywords = ["logging", "tracing", "json", "subscriber"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mladedav/json-subscriber"
+
+[features]
+default = []
+tracing-log = ["tracing-subscriber/tracing-log", "dep:tracing-log"]
+env-filter = ["tracing-subscriber/env-filter"]
+opentelemetry = ["dep:tracing-opentelemetry-0-25", "dep:opentelemetry-0-24"]
+tracing-opentelemetry-0-28 = [
+    "dep:tracing-opentelemetry-0-28",
+    "dep:opentelemetry-0-27",
+]
+tracing-opentelemetry-0-29 = [
+    "dep:tracing-opentelemetry-0-29",
+    "dep:opentelemetry-0-28",
+]
+tracing-opentelemetry-0-30 = [
+    "dep:tracing-opentelemetry-0-30",
+    "dep:opentelemetry-0-29",
+]
+tracing-opentelemetry-0-31 = [
+    "dep:tracing-opentelemetry-0-31",
+    "dep:opentelemetry-0-30",
+]
+
+# TODO Remove this for the next breaking release.
+# This is the price I have to pay to the gods of semantic versioning for failing to notice I created
+# unintended implicit features.
+opentelemetry-0-29 = ["dep:opentelemetry-0-29"]
+opentelemetry-0-30 = ["dep:opentelemetry-0-30"]
+
+# Required for intra-doc links to resolve correctly
+__private_docs = ["tracing-subscriber/time", "tracing-subscriber/local-time"]
+
+[dependencies]
+serde = "1.0.202"
+serde_json = "1.0.117"
+uuid = { version = "1.10.0", features = ["v4"] }
+
+tracing = { version = "0.1.40", default-features = false, features = ["std"] }
+tracing-core = { version = "0.1.32", default-features = false }
+tracing-log = { version = "0.2.0", default-features = false, optional = true }
+tracing-serde = { version = "0.2.0", default-features = false }
+tracing-subscriber = { version = "0.3.18", default-features = false, features = [
+    "std",
+    "registry",
+    "fmt",
+] }
+
+# OpenTelemetry
+tracing-opentelemetry-0-25 = { package = "tracing-opentelemetry", version = "0.25.0", default-features = false, optional = true }
+opentelemetry-0-24 = { package = "opentelemetry", version = "0.24.0", default-features = false, optional = true }
+tracing-opentelemetry-0-28 = { package = "tracing-opentelemetry", version = "0.28.0", default-features = false, optional = true }
+opentelemetry-0-27 = { package = "opentelemetry", version = "0.27.0", default-features = false, optional = true }
+tracing-opentelemetry-0-29 = { package = "tracing-opentelemetry", version = "0.29.0", default-features = false, optional = true }
+opentelemetry-0-28 = { package = "opentelemetry", version = "0.28.0", default-features = false, optional = true }
+tracing-opentelemetry-0-30 = { package = "tracing-opentelemetry", version = "0.30.0", default-features = false, optional = true }
+opentelemetry-0-29 = { package = "opentelemetry", version = "0.29.0", default-features = false, features = ["futures"], optional = true }
+tracing-opentelemetry-0-31 = { package = "tracing-opentelemetry", version = "0.31.0", default-features = false, optional = true }
+opentelemetry-0-30 = { package = "opentelemetry", version = "0.30.0", default-features = false, optional = true }
+
+# OpenTelemetry depends on this but with a version such that minimal versions are broken. We do not use this.
+async-trait = { version = "0.1.9", default-features = false, optional = true }
+# Another dependency that needs to have higher version to compile
+lazy_static = { version = "1.1.0", default-features = false, optional = true }
+
+
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false }
+snafu = "0.6.10"
+thiserror = "1.0.31"
+tracing = { version = "0.1", features = ["attributes"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Used in an example. Should be kept in sync with the latest opentelemetry feature.
+opentelemetry_sdk = { version = "0.30", default-features = false }
+opentelemetry-stdout = "0.30"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "tracing_subscriber"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bench_tracing_baseline)'] }

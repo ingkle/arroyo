@@ -1,0 +1,32 @@
+[package]
+name = "typify-impl"
+version = "0.4.3"
+edition = "2021"
+license = "Apache-2.0"
+description = "typify backend implementation"
+repository = "https://github.com/oxidecomputer/typify"
+readme = "../README.md"
+
+[dependencies]
+heck = { workspace = true }
+log = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+regress = { workspace = true }
+schemars = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+syn = { workspace = true }
+thiserror = { workspace = true }
+unicode-ident = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }
+expectorate = { workspace = true }
+paste = { workspace = true }
+rustfmt-wrapper = { workspace = true }
+schema = { workspace = true }
+schemars = { workspace = true, features = ["uuid1", "impl_json_schema"] }
+syn = { workspace = true, features = ["full", "extra-traits", "visit-mut"] }
+uuid = { workspace = true }

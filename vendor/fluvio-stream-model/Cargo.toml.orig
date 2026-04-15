@@ -1,0 +1,32 @@
+[package]
+name = "fluvio-stream-model"
+edition = "2021"
+version = "0.11.5"
+authors = ["Fluvio Contributors <team@fluvio.io>"]
+description = "Fluvio Event Stream Model"
+repository = "https://github.com/infinyon/fluvio"
+license = "Apache-2.0"
+
+[lib]
+name = "fluvio_stream_model"
+path = "src/lib.rs"
+
+[features]
+use_serde = ["serde"]
+k8 = ["use_serde", "k8-types"]
+fixture = ["serde"]
+fixtures = []
+
+[dependencies]
+async-lock = { workspace = true }
+event-listener = { workspace = true }
+once_cell = { workspace = true }
+serde = { workspace = true, features = ['derive'], optional = true }
+tracing = { workspace = true }
+
+# Fluvio dependencies
+k8-types = { workspace = true, optional = true, features = ["app"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
+fluvio-future = { workspace = true, features = ["fixture"] }

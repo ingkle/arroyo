@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "91c742927645f3790b3c7092e9fb08d5c6e3b6fd"
+  },
+  "path_in_vcs": "crates/fluvio-smartmodule"
+}

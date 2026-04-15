@@ -1,0 +1,15 @@
+[package]
+name = "flv-util"
+version = "0.5.2"
+authors = ["Fluvio Contributors <team@fluvio.io>"]
+description = "utilies for Fluvio projects"
+repository = "https://github.com/infinyon/flv-util"
+edition = "2018"
+license = "Apache-2.0"
+
+[features]
+fixture = []
+
+[dependencies]
+log = "0.4.0"
+tracing = "0.1.21"

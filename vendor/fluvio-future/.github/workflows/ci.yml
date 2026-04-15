@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  merge_group:
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-windows:
+    name: Run tests on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-latest-test
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install NASM for AWS-LC
+        uses: ilammy/setup-nasm@v1
+      - name: Install bindgen-cli
+        run: cargo install --force --locked bindgen-cli
+      - name: Test Setup
+        run: |
+          make certs
+          # cargo binstall -y http-server
+          cargo install http-server
+      - name: Test
+        run: |
+          Start-Process cmd -Args /c,"http-server --tls --tls-key certs/test-certs/server.key --tls-cert certs/test-certs/server.crt --tls-key-algorithm pkcs8"
+          cargo test --features task,subscriber,fixture,task_unstable,io,sync,future,net,tls,rust_tls,timer,fs,zero_copy,mmap,retry
+  test:
+    name: Check ${{ matrix.check }} on (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable]
+        check: [test]
+        include:
+          - os: ubuntu-latest
+            rust: stable
+            check: fmt
+          - os: ubuntu-latest
+            rust: stable
+            check: clippy
+          - os: ubuntu-latest
+            rust: stable
+            check: audit
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ matrix.rust }} Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.check }}
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Clippy
+        if: ${{ matrix.check == 'clippy' }}
+        run: make check-clippy
+      - name: Fmt
+        if: ${{ matrix.check == 'fmt' }}
+        run: make check-fmt
+      - name: Test
+        if: ${{ matrix.check == 'test' && matrix.os != 'macos-latest' }}
+        timeout-minutes: 15
+        run: make test-all
+      - name: Test (macos)
+        if: ${{ matrix.check == 'test' && matrix.os == 'macos-latest'}}
+        timeout-minutes: 15
+        run: make test-macos
+      - name: cargo audit
+        if: ${{ matrix.check == 'audit' }}
+        timeout-minutes: 15
+        uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  wasm_test:
+    name: Wasm test on (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+   #   fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust: stable
+            test: linux-wasm
+  #        - os: macos-latest
+  #          rust: stable
+  #          test: mac-wasm
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ matrix.rust }} Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: wasm32-unknown-unknown
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Run Wasm Test on Linux
+        if: matrix.test == 'linux-wasm'
+        run: |
+          cargo install websocat
+          websocat -t ws-l:127.0.0.1:1234 mirror: & disown
+          make test-wasm
+      - name: Run Wasm Test on Mac
+        if: matrix.test == 'mac-wasm'
+        run: |
+          brew install websocat
+          websocat -t ws-l:127.0.0.1:1234 mirror: & disown
+          make test-wasm-safari
+
+  done:
+    name: Done
+    needs:
+      - test-windows
+      - test
+      - wasm_test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Done
+        run: echo "Done!"

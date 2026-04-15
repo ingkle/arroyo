@@ -1,0 +1,76 @@
+[package]
+name = "fluvio-protocol"
+edition = "2021"
+version = "0.12.4"
+authors = ["Fluvio Contributors <team@fluvio.io>"]
+description = "Fluvio streaming protocol"
+repository = "https://github.com/infinyon/fluvio"
+license = "Apache-2.0"
+categories = ["encoding", "api-bindings"]
+
+# Refer: https://bheisler.github.io/criterion.rs/book/faq.html#cargo-bench-gives-unrecognized-option-errors-for-valid-command-line-options
+[lib]
+bench = false
+
+[[bench]]
+name = "bench"
+harness = false
+
+[[test]]
+name = "api-test"
+path = "api-test/api.rs"
+required-features = ["api"]
+
+[[test]]
+name = "derive-test"
+path = "derive-test/mod.rs"
+required-features = ["api"]
+
+[features]
+default = ["derive"]
+derive = ["fluvio-protocol-derive"]
+api = [ ]
+codec = ["tokio-util"]
+store = ["fluvio-future"]
+record = [
+    "crc32c",
+    "content_inspector",
+    "fluvio-compression",
+    "once_cell",
+    "fluvio-types"
+]
+types = ["fluvio-types"]
+link = ["api","record","thiserror","flv-util","semver","eyre"]
+fixture = ["record","derive_builder"]
+compress = ["fluvio-compression/compress"]
+
+[dependencies]
+bytes = { workspace = true  }
+cfg-if = { workspace = true }
+crc32c = { workspace = true,  optional = true }
+content_inspector = { optional = true, workspace = true }
+once_cell = { workspace = true, optional = true }
+derive_builder = { workspace = true,  optional = true }
+eyre = { workspace = true,  optional = true }
+semver = { workspace = true, optional = true }
+thiserror = { workspace = true,  optional = true }
+tokio-util = { workspace = true, features = ["codec","compat"], optional = true }
+tracing = { workspace = true }
+
+
+fluvio-protocol-derive = { version = "0.5.0", path = "../fluvio-protocol-derive", optional = true }
+fluvio-future = { workspace = true, optional = true }
+flv-util = { workspace = true,  optional = true }
+fluvio-compression = { path = "../fluvio-compression", version = "0.3.0", default-features = false, optional = true }
+fluvio-types = { workspace = true,  optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+trybuild = "1.0.64"
+fluvio-future = { workspace = true, features = [
+    "fixture",
+    "subscriber",
+    "timer",
+    "net",
+] }
+futures = { workspace = true }

@@ -1,0 +1,16 @@
+version = "1.0"
+current_profile = "local"
+[profile.local]
+cluster = "local"
+[cluster.local]
+addr = "localhost:9003"
+
+[cluster.local.tls]
+tls_policy = "verified"
+tls_source = "inline"
+
+[cluster.local.tls.certs]
+key = "ABCDEFF"
+cert = "JJJJ"
+ca_cert = "XXXXX"
+domain = "my_domain"

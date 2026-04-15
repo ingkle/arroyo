@@ -1,0 +1,17 @@
+[workspace]
+publish = false
+release = false
+changelog_update = false
+
+[[package]]
+name = "rabbitmq-stream-client"
+publish = true
+release = true
+changelog_update = true
+
+
+[[package]]
+name = "rabbitmq-stream-protocol"
+publish = true
+release = true
+changelog_update = true

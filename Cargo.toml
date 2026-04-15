@@ -85,21 +85,23 @@ debug = 1
 split-debuginfo = "unpacked"
 
 [patch.crates-io]
-typify = { git = 'http://192.168.200.60:30401/root/typify.git', branch = 'arroyo' }
-parquet = {git = 'http://192.168.200.60:30401/root/arrow-rs', branch = '55.2.0/parquet'}
-arrow-json = {git = 'http://192.168.200.60:30401/root/arrow-rs', branch = '55.2.0/json'}
-datafusion = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-common = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-execution = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-expr = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-physical-expr = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-physical-plan = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-proto = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-functions = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
-datafusion-functions-window = {git = 'http://192.168.200.60:30401/root/arrow-datafusion', branch = '48.0.1/arroyo'}
+typify = { git = 'https://github.com/ArroyoSystems/typify.git', branch = 'arroyo' }
+parquet = {git = 'https://github.com/ArroyoSystems/arrow-rs', branch = '55.2.0/parquet'}
+arrow-json = {git = 'https://github.com/ArroyoSystems/arrow-rs', branch = '55.2.0/json'}
+datafusion = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-common = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-execution = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-expr = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-physical-expr = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-physical-plan = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-proto = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-functions = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
+datafusion-functions-window = {git = 'https://github.com/ArroyoSystems/arrow-datafusion', branch = '48.0.1/arroyo'}
 
-sqlparser = { git = "http://192.168.200.60:30401/root/sqlparser-rs", branch = "0.55.0/arroyo" }
+sqlparser = { git = "https://github.com/ArroyoSystems/sqlparser-rs", branch = "0.55.0/arroyo" }
 
-cornucopia_async = { git = "http://192.168.200.60:30401/root/cornucopia", branch = "sqlite" }
-cornucopia = { git = "http://192.168.200.60:30401/root/cornucopia", branch = "sqlite" }
-jiter = {git = "http://192.168.200.60:30401/root/jiter", branch = "disable_python" }
+cornucopia_async = { git = "https://github.com/ArroyoSystems/cornucopia", branch = "sqlite" }
+cornucopia = { git = "https://github.com/ArroyoSystems/cornucopia", branch = "sqlite" }
+jiter = {git = "https://github.com/ArroyoSystems/jiter", branch = "disable_python" }
+
+progenitor-client = { git = "https://github.com/oxidecomputer/progenitor" }

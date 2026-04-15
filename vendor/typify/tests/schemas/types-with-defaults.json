@@ -1,0 +1,90 @@
+{
+  "$comment": "defaults for built-in types",
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "definitions": {
+    "TestBed": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "default": "abc123-is-this-a-uuid"
+        },
+        "any": {
+          "type": "array",
+          "items": {},
+          "default": [
+            [
+              8,
+              6,
+              7
+            ],
+            [
+              5,
+              3,
+              0,
+              9
+            ]
+          ]
+        }
+      }
+    },
+    "OuterThing": {
+      "type": "object",
+      "properties": {
+        "thing": {
+          "type": "object",
+          "title": "ThingWithDefaults",
+          "properties": {
+            "a": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "type": "bee"
+          }
+        }
+      }
+    },
+    "Doodad": {
+      "type": "object",
+      "properties": {
+        "when": {
+          "type": "string",
+          "format": "date-time",
+          "default": "1970-01-01T00:00:00Z"
+        }
+      }
+    },
+    "MrDefaultNumbers": {
+      "type": "object",
+      "properties": {
+        "little_u8": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 1,
+          "default": 2
+        },
+        "little_u16": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1,
+          "default": 3
+        },
+        "big_nullable": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1,
+          "default": 1
+        }
+      }
+    }
+  }
+}

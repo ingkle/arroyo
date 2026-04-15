@@ -1,0 +1,32 @@
+[package]
+name = "typify"
+version = "0.4.3"
+edition = "2021"
+license = "Apache-2.0"
+description = "JSON schema to rust type code generator"
+repository = "https://github.com/oxidecomputer/typify"
+readme = "../README.md"
+keywords = ["json", "schema", "proc_macro"]
+categories = ["api-bindings", "compilers"]
+
+[features]
+default = ["macro"]
+macro = ["typify-macro"]
+
+[dependencies]
+typify-macro = { workspace = true, optional = true }
+typify-impl = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+env_logger = { workspace = true }
+expectorate = { workspace = true }
+glob = { workspace = true }
+quote = { workspace = true }
+regress = { workspace = true }
+rustfmt-wrapper = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+trybuild = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }

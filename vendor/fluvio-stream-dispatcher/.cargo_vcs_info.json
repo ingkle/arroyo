@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "4bffcf9465c169f62d1884e470d5bf65294e80f4"
+  },
+  "path_in_vcs": "crates/fluvio-stream-dispatcher"
+}

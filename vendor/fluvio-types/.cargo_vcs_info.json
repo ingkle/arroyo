@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "589b4e0448e3ec69a10eb030a98d0824615a9e67"
+  },
+  "path_in_vcs": "crates/fluvio-types"
+}

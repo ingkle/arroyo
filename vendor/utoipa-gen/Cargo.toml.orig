@@ -1,0 +1,61 @@
+[package]
+name = "utoipa-gen"
+description = "Code generation implementation for utoipa"
+version = "4.3.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["openapi", "codegen", "proc-macro", "documentation", "compile-time"]
+repository = "https://github.com/juhaku/utoipa"
+authors = ["Juha Kukkonen <juha7kukkonen@gmail.com>"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+quote = "1.0"
+proc-macro-error = "1.0"
+regex = { version = "1.7", optional = true }
+uuid = { version = "1", features = ["serde"], optional = true }
+ulid = { version = "1", optional = true, default-features = false }
+url = { version = "2", optional = true }
+
+[dev-dependencies]
+utoipa = { path = "../utoipa", features = ["debug", "uuid"], default-features = false }
+serde_json = "1"
+serde = "1"
+actix-web = { version = "4", features = ["macros"], default-features = false }
+axum = { version = "0.7", default-features = false, features = ["json", "query"] }
+paste = "1"
+rocket = { version = "0.5", features = ["json"] }
+smallvec = { version = "1.10", features = ["serde"] }
+rust_decimal = "1"
+chrono = { version = "0.4", features = ["serde"] }
+assert-json-diff = "2"
+time = { version = "0.3", features = ["serde-human-readable"] }
+serde_with = "3.0"
+
+[features]
+# See README.md for list and explanations of features
+debug = ["syn/extra-traits"]
+actix_extras = ["regex", "syn/extra-traits"]
+chrono = []
+yaml = []
+decimal = []
+decimal_float = []
+rocket_extras = ["regex", "syn/extra-traits"]
+non_strict_integers = []
+uuid = ["dep:uuid"]
+ulid = ["dep:ulid"]
+url = ["dep:url"]
+axum_extras = ["regex", "syn/extra-traits"]
+time = []
+smallvec = []
+repr = []
+indexmap = []
+rc_schema = []
+
+# EXPERIEMENTAL! use with cauntion
+auto_into_responses = []

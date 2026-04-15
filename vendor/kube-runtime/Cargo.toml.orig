@@ -1,0 +1,61 @@
+[package]
+name = "kube-runtime"
+description = "Kubernetes controller runtime"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+keywords = ["kubernetes", "runtime", "reflector", "watcher", "controller"]
+categories = ["web-programming::http-client", "caching", "network-programming"]
+
+[features]
+unstable-runtime = ["unstable-runtime-subscribe", "unstable-runtime-stream-control", "unstable-runtime-reconcile-on"]
+unstable-runtime-subscribe = []
+unstable-runtime-stream-control = []
+unstable-runtime-reconcile-on = []
+
+[package.metadata.docs.rs]
+features = ["k8s-openapi/latest", "unstable-runtime"]
+# Define the configuration attribute `docsrs`. Used to enable `doc_cfg` feature.
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+#workspace = true
+rust.unsafe_code = "forbid"
+# TODO: make this pass and switch to workspace lints
+#rust.missing_docs = "warn"
+
+[dependencies]
+futures = { workspace = true, features = ["async-await"] }
+kube-client = { path = "../kube-client", version = "=0.99.0", default-features = false, features = ["jsonpatch", "client"] }
+educe = { workspace = true, features = ["Clone", "Debug", "Hash", "PartialEq"] }
+serde.workspace = true
+ahash.workspace = true
+parking_lot.workspace = true
+pin-project.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-util = { workspace = true, features = ["time"] }
+tracing.workspace = true
+json-patch.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+backon.workspace = true
+async-trait.workspace = true
+hashbrown.workspace = true
+k8s-openapi.workspace = true
+async-broadcast.workspace = true
+async-stream.workspace = true
+hostname.workspace = true
+
+[dev-dependencies]
+kube = { path = "../kube", features = ["derive", "client", "runtime"], version = "<2.0.0, >=0.98.0" }
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+rand.workspace = true
+schemars.workspace = true
+tracing-subscriber.workspace = true
+k8s-openapi= { workspace = true, features = ["latest"] }

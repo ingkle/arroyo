@@ -1,0 +1,44 @@
+[package]
+name = "fluvio-spu-schema"
+version = "0.17.0"
+edition = "2021"
+authors = ["Fluvio Contributors <team@fluvio.io>"]
+description = "Fluvio API for SPU"
+repository = "https://github.com/infinyon/fluvio"
+license = "Apache-2.0"
+
+[lib]
+name = "fluvio_spu_schema"
+path = "src/lib.rs"
+
+[features]
+file = ["fluvio-future","fluvio-protocol/store"]
+
+[dependencies]
+bytes = { workspace = true }
+derive_builder = { workspace = true }
+educe = { version = "0.6.0", features = ["Debug"] }
+flate2 = { workspace = true  }
+serde = { workspace = true, features = ['derive'] }
+static_assertions = { workspace = true }
+tracing = { workspace = true }
+
+fluvio-types = { workspace = true }
+fluvio-future = { workspace = true, optional = true }
+# Fluvio dependencies
+fluvio-protocol = { workspace = true,  features = [
+    "api",
+    "record",
+    "link"
+] }
+fluvio-smartmodule = { workspace = true }
+
+
+[dev-dependencies]
+futures-util = { workspace = true }
+fluvio-socket = { workspace = true, features = ["file"] }
+fluvio-future = { workspace = true, features = ["fixture", "fs"] }
+flv-util = { workspace = true, features = ["fixture"] }
+fluvio-protocol = { workspace = true,  features = [
+    "compress"
+] }

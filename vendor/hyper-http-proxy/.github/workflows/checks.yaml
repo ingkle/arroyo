@@ -1,0 +1,38 @@
+name: Checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: ~
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install latest stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
+
+      - name: Run rustfmt
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        uses: giraffate/clippy-action@v1
+        with:
+          reporter: 'github-pr-check'
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests default
+        run: cargo test
+      - name: Run tests rustls-tls-webpki-roots
+        run: cargo test --no-default-features --features rustls-tls-webpki-roots
+      - name: Run tests native-tls-vendored
+        run: cargo test --no-default-features --features native-tls-vendored
+      - name: Run tests native-tls
+        run: cargo test --no-default-features --features native-tls

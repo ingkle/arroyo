@@ -1,0 +1,59 @@
+[package]
+name = "fluvio-socket"
+version = "0.15.2"
+edition = "2021"
+authors = ["Fluvio Contributors <team@fluvio.io>"]
+description = "Provide TCP socket wrapper for fluvio protocol"
+repository = "https://github.com/infinyon/fluvio"
+license = "Apache-2.0"
+categories = ["encoding"]
+
+[lib]
+name = "fluvio_socket"
+path = "src/lib.rs"
+
+[features]
+file = ["fluvio-future/zero_copy", "fluvio-protocol/store"]
+
+[dependencies]
+tracing = { workspace = true }
+cfg-if = { workspace = true }
+bytes = { workspace = true }
+once_cell = { workspace = true }
+futures-util = { features = ["sink", "io"], workspace = true }
+async-lock = { workspace = true }
+event-listener = { workspace = true }
+async-channel = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+tokio-util = { features = ["codec", "compat"], workspace = true }
+async-trait = { workspace = true }
+pin-project = { workspace = true }
+thiserror = { workspace = true }
+semver = { workspace = true }
+nix = { workspace = true, features = ["uio"]}
+
+# Fluvio dependencies
+fluvio-future = { workspace = true, features = ["net", "task", "retry"] }
+fluvio-protocol = { workspace = true, features = [
+    "derive",
+    "api",
+    "codec",
+    "link",
+] }
+
+[dev-dependencies]
+portpicker = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+fluvio-future = { workspace = true, features = [
+    "fixture",
+    "fs",
+    "zero_copy",
+    "native_tls",
+] }
+fluvio-types = { workspace = true, features = ["events"] }
+
+
+
+[build-dependencies]
+built = "0.7.0"

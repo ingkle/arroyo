@@ -1,0 +1,28 @@
+[package]
+name = "quad-rand"
+version = "0.2.3"
+authors = ["not-fl3 <not.fl3@gmail.com>"]
+edition = "2018"
+license = "MIT"
+homepage = "https://github.com/not-fl3/quad-rand"
+repository = "https://github.com/not-fl3/quad-rand"
+description = """
+Pseudo random implementation with core atomics.
+"""
+readme = "README.md"
+
+[dependencies]
+rand = { version = "0.8", optional = true }
+
+[[example]]
+name = "compat"
+path = "examples/compat.rs"
+required-features = ["rand"]
+
+[[example]]
+name = "compat-with-state"
+path = "examples/compat_with_state.rs"
+required-features = ["rand"]
+
+[package.metadata.docs.rs]
+all-features = true

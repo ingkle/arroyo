@@ -1,0 +1,17 @@
+[package]
+name = "tracing-logfmt"
+version = "0.2.0"
+edition = "2021"
+authors = ["Embark <opensource@embark-studios.com>"]
+license = "MIT OR Apache-2.0"
+description = "A logfmt formatter for tracing events and spans"
+homepage = "https://github.com/EmbarkStudios/tracing-logfmt"
+repository = "https://github.com/EmbarkStudios/tracing-logfmt"
+keywords = ["logging", "tracing"]
+readme = "README.md"
+
+[dependencies]
+time = { version = "0.3.7", features = ["formatting"]}
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = "0.3"

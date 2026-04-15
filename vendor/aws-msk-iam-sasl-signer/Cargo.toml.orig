@@ -1,0 +1,42 @@
+[package]
+name = "aws-msk-iam-sasl-signer"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Yuhao Su<yuhaosu@outlook.com>"]
+description = "AWS MSK IAM SASL Signer"
+repository = "https://github.com/yuhao-su/aws-msk-iam-sasl-signer-rs"
+homepage = "https://github.com/yuhao-su/aws-msk-iam-sasl-signer-rs"
+readme = "README.md"
+keywords = ["aws", "msk", "kafka", "sasl", "iam"]
+categories = ["authentication"]
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+aws-config = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+    "rt-tokio",
+    "rustls",
+] }
+aws-credential-types = { version = "1", default-features = false, features = [
+    "hardcoded-credentials",
+] }
+aws-sdk-sts ={ version = "1", default-features = false, features = [
+    "rt-tokio",
+    "rustls",
+] }
+aws-sigv4 = { version = "1", features = ["sign-http"] }
+aws-types = "1"
+base64 = "0.22"
+chrono = "0.4"
+futures = "0.3"
+thiserror = "1"
+url = "2"
+
+[dev-dependencies]
+rdkafka ={ version = "0.36", features = [
+    "cmake-build", "ssl"
+] }
+
+tokio ={ version = "1", features = ["macros", "time", "rt-multi-thread"] }
+tracing-subscriber = "0.3"

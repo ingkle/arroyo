@@ -1,0 +1,171 @@
+[package]
+name = "deltalake-core"
+version = "0.27.0"
+authors.workspace = true
+keywords.workspace = true
+readme.workspace = true
+edition.workspace = true
+homepage.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+features = ["datafusion", "json"]
+
+[dependencies]
+deltalake-derive = { version = "0.27.0", path = "../derive" }
+
+delta_kernel.workspace = true
+
+# arrow
+arrow = { workspace = true }
+arrow-arith = { workspace = true }
+arrow-array = { workspace = true, features = ["chrono-tz"] }
+arrow-buffer = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-json = { workspace = true }
+arrow-ord = { workspace = true }
+arrow-row = { workspace = true }
+arrow-schema = { workspace = true, features = ["serde"] }
+arrow-select = { workspace = true }
+parquet = { workspace = true, features = ["async", "object_store"] }
+object_store = { workspace = true }
+pin-project-lite = "^0.2.7"
+
+# datafusion
+datafusion = { workspace = true, optional = true }
+datafusion-proto = { workspace = true, optional = true }
+
+# serde
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+strum = { workspace = true }
+
+# "stdlib"
+bytes = { workspace = true }
+chrono = { workspace = true, default-features = false, features = ["clock"] }
+regex = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
+url = { workspace = true, features = ["serde"] }
+urlencoding = { workspace = true }
+
+# runtime
+async-trait = { workspace = true }
+futures = { workspace = true }
+num_cpus = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "process",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "fs",
+    "parking_lot",
+] }
+
+# caching
+foyer = { version = "0.17.2", optional = true, features = ["serde"] }
+tempfile = { version = "3.19.1", optional = true }
+
+# other deps (these should be organized and pulled into workspace.dependencies as necessary)
+cfg-if = "1"
+dashmap = "6"
+either = "1.8"
+indexmap = "2.2.1"
+itertools = "0.14"
+num-bigint = "0.4"
+num-traits = "0.2.15"
+parking_lot = "0.12"
+percent-encoding = "2"
+tracing = { workspace = true }
+rand = "0.8"
+maplit = "1"
+sqlparser = { version = "0.56.0" }
+humantime = { version = "2.1.0" }
+validator = { version = "0.19", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.5"
+ctor = "0"
+datatest-stable = "0.2"
+deltalake-test = { path = "../test" }
+dotenvy = "0"
+fs_extra = "1.2.0"
+maplit = "1"
+pretty_assertions = "1.2.1"
+pretty_env_logger = "0.5.0"
+rstest = { version = "0.25.0" }
+serial_test = "3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = ["rustls"]
+datafusion = [
+    "dep:datafusion",
+    "datafusion-proto",
+]
+datafusion-ext = ["datafusion"]
+json = ["parquet/json"]
+python = ["arrow/pyarrow"]
+native-tls = ["delta_kernel/default-engine"]
+rustls = ["delta_kernel/default-engine-rustls"]
+cloud = ["object_store/cloud"]
+
+# enable caching some file I/O operations when scanning delta logs
+delta-cache = ["foyer", "tempfile", "url/serde"]
+
+integration_test = []
+
+[[test]]
+name = "dat"
+harness = false
+
+[[test]]
+name = "command_optimize"
+required-features = ["datafusion"]
+
+[[test]]
+name = "command_merge"
+required-features = ["datafusion"]
+
+[[test]]
+name = "command_restore"
+required-features = ["datafusion"]
+
+[[test]]
+name = "checkpoint_writer"
+required-features = ["datafusion"]
+
+[[test]]
+name = "command_filesystem_check"
+required-features = ["datafusion"]
+
+[[test]]
+name = "command_vacuum"
+required-features = ["datafusion"]
+
+[[test]]
+name = "commit_info_format"
+required-features = ["datafusion"]
+
+[[test]]
+name = "integration"
+required-features = ["datafusion"]
+
+[[test]]
+name = "integration_checkpoint"
+required-features = ["datafusion"]
+
+[[test]]
+name = "read_delta_log_test"
+required-features = ["datafusion"]
+
+[[test]]
+name = "read_delta_partitions_test"
+required-features = ["datafusion"]

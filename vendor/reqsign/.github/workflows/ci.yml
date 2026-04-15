@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - v*
+  pull_request:
+    branches:
+      - main
+      - v*
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/check
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-22.04
+          - macos-13
+          - windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+
+  build_under_wasm:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --target wasm32-unknown-unknown
+
+  build_single_feature:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        feature:
+          - services-aliyun
+          - services-aws
+          - services-azblob
+          - services-google
+          - services-huaweicloud
+          - services-oracle
+          - services-tencent
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --no-default-features --features reqwest_request,${{ matrix.feature }}
+
+  build_all_features:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-22.04
+          - macos-13
+          - windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --all-features
+
+  unit:
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+      - name: Test
+        run: cargo nextest run --no-fail-fast
+        env:
+          RUST_LOG: DEBUG
+          RUST_BACKTRACE: full
+          # Azure Storage Test
+          REQSIGN_AZURE_STORAGE_TEST: ${{ secrets.REQSIGN_AZURE_STORAGE_TEST }}
+          REQSIGN_AZURE_STORAGE_URL: ${{ secrets.REQSIGN_AZURE_STORAGE_URL }}
+          REQSIGN_AZURE_STORAGE_ACCOUNT_NAME: ${{ secrets.REQSIGN_AZURE_STORAGE_ACCOUNT_NAME }}
+          REQSIGN_AZURE_STORAGE_ACCOUNT_KEY: ${{ secrets.REQSIGN_AZURE_STORAGE_ACCOUNT_KEY }}
+          # AWS V4 Test
+          REQSIGN_AWS_V4_TEST: ${{ secrets.REQSIGN_AWS_V4_TEST }}
+          REQSIGN_AWS_V4_SERVICE: ${{ secrets.REQSIGN_AWS_V4_SERVICE }}
+          REQSIGN_AWS_V4_URL: ${{ secrets.REQSIGN_AWS_V4_URL }}
+          REQSIGN_AWS_V4_REGION: ${{ secrets.REQSIGN_AWS_V4_REGION }}
+          REQSIGN_AWS_V4_ACCESS_KEY: ${{ secrets.REQSIGN_AWS_V4_ACCESS_KEY }}
+          REQSIGN_AWS_V4_SECRET_KEY: ${{ secrets.REQSIGN_AWS_V4_SECRET_KEY }}
+          REQSIGN_AWS_ROLE_ARN: ${{ secrets.REQSIGN_AWS_ROLE_ARN }}
+          REQSIGN_AWS_IDP_URL: ${{ secrets.REQSIGN_AWS_IDP_URL }}
+          REQSIGN_AWS_IDP_BODY: ${{ secrets.REQSIGN_AWS_IDP_BODY }}
+          # Google Cloud Storage Test
+          REQSIGN_GOOGLE_TEST: ${{ secrets.REQSIGN_GOOGLE_TEST }}
+          REQSIGN_GOOGLE_CREDENTIAL: ${{ secrets.REQSIGN_GOOGLE_CREDENTIAL }}
+          REQSIGN_GOOGLE_CLOUD_STORAGE_SCOPE: ${{ secrets.REQSIGN_GOOGLE_CLOUD_STORAGE_SCOPE }}
+          REQSIGN_GOOGLE_CLOUD_STORAGE_URL: ${{ secrets.REQSIGN_GOOGLE_CLOUD_STORAGE_URL }}
+          # Aliyun OSS Test
+          REQSIGN_ALIYUN_OSS_TEST: ${{ secrets.REQSIGN_ALIYUN_OSS_TEST }}
+          REQSIGN_ALIYUN_OSS_BUCKET: ${{ secrets.REQSIGN_ALIYUN_OSS_BUCKET }}
+          REQSIGN_ALIYUN_OSS_URL: ${{ secrets.REQSIGN_ALIYUN_OSS_URL }}
+          REQSIGN_ALIYUN_OSS_ACCESS_KEY: ${{ secrets.REQSIGN_ALIYUN_OSS_ACCESS_KEY }}
+          REQSIGN_ALIYUN_OSS_SECRET_KEY: ${{ secrets.REQSIGN_ALIYUN_OSS_SECRET_KEY }}
+          REQSIGN_ALIYUN_PROVIDER_ARN: ${{ secrets.REQSIGN_ALIYUN_PROVIDER_ARN }}
+          REQSIGN_ALIYUN_ROLE_ARN: ${{ secrets.REQSIGN_ALIYUN_ROLE_ARN }}
+          REQSIGN_ALIYUN_IDP_URL: ${{ secrets.REQSIGN_ALIYUN_IDP_URL }}
+          REQSIGN_ALIYUN_IDP_BODY: ${{ secrets.REQSIGN_ALIYUN_IDP_BODY }}
+          # Tencent COS Test
+          REQSIGN_TENCENT_COS_TEST: ${{ secrets.REQSIGN_TENCENT_COS_TEST }}
+          REQSIGN_TENCENT_COS_ACCESS_KEY: ${{ secrets.REQSIGN_TENCENT_COS_ACCESS_KEY }}
+          REQSIGN_TENCENT_COS_SECRET_KEY: ${{ secrets.REQSIGN_TENCENT_COS_SECRET_KEY }}
+          REQSIGN_TENCENT_COS_URL: ${{ secrets.REQSIGN_TENCENT_COS_URL }}
+      - name: Doctest
+        run: cargo test --doc
+
+  test_gcs_web_identify:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: "read"
+      id-token: "write"
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - id: auth
+        uses: google-github-actions/auth@v2.1.3
+        with:
+          token_format: "access_token"
+          create_credentials_file: true
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER_ID }}
+          service_account: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+
+      - name: Test
+        run: cargo nextest run --no-fail-fast
+        env:
+          RUST_LOG: DEBUG
+          RUST_BACKTRACE: full
+          REQSIGN_GOOGLE_CREDENTIAL_PATH: ${{steps.auth.outputs.credentials_file_path}}
+
+  test_tencent_cloud_web_identify:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: "read"
+      id-token: "write"
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - name: Get Id Token
+        uses: actions/github-script@v7
+        id: idtoken
+        with:
+          script: |
+            let id_token = await core.getIDToken('sts.tencentcloudapi.com')
+            core.exportVariable('GITHUB_ID_TOKEN', id_token)
+            core.setSecret(id_token)
+
+      - name: Test
+        run: cargo nextest run --no-fail-fast
+        env:
+          RUST_LOG: DEBUG
+          RUST_BACKTRACE: full
+          REQSIGN_TENCENT_COS_TEST: ${{ secrets.REQSIGN_TENCENT_COS_TEST }}
+          REQSIGN_TENCENT_COS_ACCESS_KEY: ${{ secrets.REQSIGN_TENCENT_COS_ACCESS_KEY }}
+          REQSIGN_TENCENT_COS_SECRET_KEY: ${{ secrets.REQSIGN_TENCENT_COS_SECRET_KEY }}
+          REQSIGN_TENCENT_COS_URL: ${{ secrets.REQSIGN_TENCENT_COS_URL }}
+          REQSIGN_TENCENT_COS_ROLE_ARN: ${{ secrets.REQSIGN_TENCENT_COS_ROLE_ARN }}
+          REQSIGN_TENCENT_COS_PROVIDER_ID: ${{ secrets.REQSIGN_TENCENT_COS_PROVIDER_ID }}
+          REQSIGN_TENCENT_COS_REGION: ${{ secrets.REQSIGN_TENCENT_COS_REGION }}
+
+  test_aws_web_identity:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: "read"
+      id-token: "write"
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - name: Get Id Token
+        uses: actions/github-script@v7
+        id: idtoken
+        with:
+          script: |
+            let id_token = await core.getIDToken('sts.amazonaws.com')
+            core.exportVariable('GITHUB_ID_TOKEN', id_token)
+            core.setSecret(id_token)
+
+      - name: Test
+        run: cargo nextest run --no-fail-fast
+        env:
+          RUST_LOG: DEBUG
+          RUST_BACKTRACE: full
+          REQSIGN_AWS_S3_TEST: on
+          REQSIGN_AWS_S3_REGION: ap-northeast-1
+          REQSIGN_AWS_ROLE_ARN: ${{ secrets.REQSIGN_AWS_ROLE_ARN }}
+          REQSIGN_AWS_ASSUME_ROLE_ARN: ${{ secrets.REQSIGN_AWS_ASSUME_ROLE_ARN }}
+          REQSIGN_AWS_PROVIDER_ARN: ${{ secrets.REQSIGN_AWS_PROVIDER_ARN }}

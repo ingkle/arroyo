@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "e88c1063b6894001fe718140d84139e6f2c2147f"
+  },
+  "path_in_vcs": "crates/fluvio-protocol-derive"
+}

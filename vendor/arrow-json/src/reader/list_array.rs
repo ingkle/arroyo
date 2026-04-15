@@ -1,0 +1,182 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+use std::sync::Arc;
+
+use crate::reader::tape::{Tape, TapeElement};
+use crate::reader::validation::{ErrorMarker, FailureKind};
+use crate::reader::{make_decoder, ArrayDecoder};
+use crate::StructMode;
+use arrow_array::builder::{BooleanBufferBuilder, BufferBuilder};
+use arrow_array::OffsetSizeTrait;
+use arrow_buffer::buffer::NullBuffer;
+use arrow_data::{ArrayData, ArrayDataBuilder};
+use arrow_schema::{ArrowError, DataType};
+use std::marker::PhantomData;
+
+pub struct ListArrayDecoder<O> {
+    data_type: Arc<DataType>,
+    decoder: Box<dyn ArrayDecoder>,
+    phantom: PhantomData<O>,
+    is_nullable: bool,
+}
+
+impl<O: OffsetSizeTrait> ListArrayDecoder<O> {
+    pub fn new(
+        data_type: DataType,
+        coerce_primitive: bool,
+        strict_mode: bool,
+        is_nullable: bool,
+        struct_mode: StructMode,
+    ) -> Result<Self, ArrowError> {
+        let field = match &data_type {
+            DataType::List(f) if !O::IS_LARGE => f,
+            DataType::LargeList(f) if O::IS_LARGE => f,
+            _ => unreachable!(),
+        };
+        let decoder = make_decoder(
+            field.data_type().clone(),
+            field.metadata(),
+            coerce_primitive,
+            strict_mode,
+            field.is_nullable(),
+            struct_mode,
+        )?;
+
+        Ok(Self {
+            data_type: Arc::new(data_type),
+            decoder,
+            phantom: Default::default(),
+            is_nullable,
+        })
+    }
+}
+
+impl<O: OffsetSizeTrait> ArrayDecoder for ListArrayDecoder<O> {
+    fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
+        let mut child_pos = Vec::with_capacity(pos.len());
+        let mut offsets = BufferBuilder::<O>::new(pos.len() + 1);
+        offsets.append(O::from_usize(0).unwrap());
+
+        let mut nulls = self
+            .is_nullable
+            .then(|| BooleanBufferBuilder::new(pos.len()));
+
+        for p in pos {
+            let end_idx = match (tape.get(*p), nulls.as_mut()) {
+                (TapeElement::StartList(end_idx), None) => end_idx,
+                (TapeElement::StartList(end_idx), Some(nulls)) => {
+                    nulls.append(true);
+                    end_idx
+                }
+                (TapeElement::Null, Some(nulls)) => {
+                    nulls.append(false);
+                    *p + 1
+                }
+                _ => return Err(tape.error(*p, "[")),
+            };
+
+            let mut cur_idx = *p + 1;
+            while cur_idx < end_idx {
+                child_pos.push(cur_idx);
+
+                // Advance to next field
+                cur_idx = tape.next(cur_idx, "list value")?;
+            }
+
+            let offset = O::from_usize(child_pos.len()).ok_or_else(|| {
+                ArrowError::JsonError(format!("offset overflow decoding {}", self.data_type))
+            })?;
+            offsets.append(offset)
+        }
+
+        let child_data = self.decoder.decode(tape, &child_pos)?;
+        let nulls = nulls.as_mut().map(|x| NullBuffer::new(x.finish()));
+
+        let data = ArrayDataBuilder::new((*self.data_type).clone())
+            .len(pos.len())
+            .nulls(nulls)
+            .add_buffer(offsets.finish())
+            .child_data(vec![child_data]);
+
+        // Safety
+        // Validated lengths above
+        Ok(unsafe { data.build_unchecked() })
+    }
+
+    fn validate_row<'tape>(
+        &'tape self,
+        tape: &'tape Tape<'_>,
+        pos: u32,
+        row_idx: usize,
+    ) -> Result<(), Vec<ErrorMarker<'tape>>> {
+        let end_idx = match tape.get(pos) {
+            TapeElement::StartList(end_idx) => end_idx,
+            TapeElement::Null => {
+                if self.is_nullable {
+                    return Ok(());
+                } else {
+                    return ErrorMarker::err(
+                        row_idx,
+                        pos,
+                        FailureKind::NullValue,
+                        Arc::clone(&self.data_type),
+                    );
+                }
+            }
+            _ => {
+                return ErrorMarker::err(
+                    row_idx,
+                    pos,
+                    FailureKind::TypeMismatch,
+                    Arc::clone(&self.data_type),
+                );
+            }
+        };
+
+        let mut cur_idx = pos + 1;
+        let mut element_idx = 0;
+        while cur_idx < end_idx {
+            match self.decoder.validate_row(tape, cur_idx, row_idx) {
+                Ok(()) => {}
+                Err(mut child_errors) => {
+                    for error in &mut child_errors {
+                        error.array_indices.push(element_idx);
+                    }
+                    return Err(child_errors);
+                }
+            }
+
+            match tape.next(cur_idx, "list value") {
+                Ok(next) => {
+                    cur_idx = next;
+                    element_idx += 1;
+                }
+                Err(_) => {
+                    return ErrorMarker::err(
+                        row_idx,
+                        cur_idx,
+                        FailureKind::TypeMismatch,
+                        Arc::clone(&self.data_type),
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}

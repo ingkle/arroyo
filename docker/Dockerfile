@@ -12,8 +12,8 @@ RUN rm -f /etc/apt/sources.list.d/* && \
     apt-get -y install curl pkg-config unzip build-essential libssl-dev openssl \
     cmake clang wget postgresql postgresql-client supervisor sudo bash libsasl2-dev nodejs npm
 
-# Cargo registry → Nexus proxy
-COPY docker/cargo-config.toml /usr/local/cargo/config.toml
+# Cargo registry → Nexus proxy (refinery_cli 설치용)
+COPY docker/cargo-nexus.toml /usr/local/cargo/config.toml
 
 RUN cargo install refinery_cli
 
@@ -33,6 +33,10 @@ COPY Cargo.lock Cargo.lock
 COPY crates crates
 COPY webui webui
 
+# vendored deps (cargo build 시 외부 접근 불필요)
+COPY vendor vendor
+COPY docker/cargo-config.toml /usr/local/cargo/config.toml
+
 # set git hash
 ENV VERGEN_GIT_SHA=$GIT_SHA
 RUN cd webui && pnpm install && pnpm build
@@ -42,15 +46,11 @@ COPY docker/refinery.toml refinery.toml
 ENV LIBRARY_PATH=/usr/local/lib \
     RUSTFLAGS="-L native=/usr/local/lib -Clink-arg=-Wl,-rpath,/usr/local/lib"
 
-# GitLab 인증 (internal 미러 레포 git clone)
-RUN git config --global credential.helper store && \
-    echo "http://root:ingkle1234@192.168.200.60:30401" > /root/.git-credentials
-
 RUN service postgresql start && \
     sudo -u postgres psql -c "CREATE USER arroyo WITH PASSWORD 'arroyo' SUPERUSER;" && \
     sudo -u postgres createdb arroyo && \
     refinery migrate -c refinery.toml -p crates/arroyo-api/migrations && \
-    CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_PROFILE_RELEASE_DEBUG=false cargo build --features ${FEATURES} --profile ${PROFILE} --bin arroyo && \
+    CARGO_PROFILE_RELEASE_DEBUG=false cargo build --offline --features ${FEATURES} --profile ${PROFILE} --bin arroyo && \
     mv target/*/arroyo /arroyo
 
 

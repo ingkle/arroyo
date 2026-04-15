@@ -1,8 +1,44 @@
 [source.crates-io]
-replace-with = "nexus"
+replace-with = "vendored-sources"
 
-[source.nexus]
-registry = "sparse+http://192.168.200.11:8081/repository/cargo-registry-group/"
+[source."git+https://github.com/ArroyoSystems/arrow-datafusion?branch=48.0.1/arroyo"]
+git = "https://github.com/ArroyoSystems/arrow-datafusion"
+branch = "48.0.1/arroyo"
+replace-with = "vendored-sources"
 
-[net]
-git-fetch-with-cli = true
+[source."git+https://github.com/ArroyoSystems/arrow-rs?branch=55.2.0/json"]
+git = "https://github.com/ArroyoSystems/arrow-rs"
+branch = "55.2.0/json"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/ArroyoSystems/arrow-rs?branch=55.2.0/parquet"]
+git = "https://github.com/ArroyoSystems/arrow-rs"
+branch = "55.2.0/parquet"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/ArroyoSystems/cornucopia?branch=sqlite"]
+git = "https://github.com/ArroyoSystems/cornucopia"
+branch = "sqlite"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/ArroyoSystems/jiter?branch=disable_python"]
+git = "https://github.com/ArroyoSystems/jiter"
+branch = "disable_python"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/ArroyoSystems/sqlparser-rs?branch=0.55.0/arroyo"]
+git = "https://github.com/ArroyoSystems/sqlparser-rs"
+branch = "0.55.0/arroyo"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/ArroyoSystems/typify.git?branch=arroyo"]
+git = "https://github.com/ArroyoSystems/typify.git"
+branch = "arroyo"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/oxidecomputer/progenitor"]
+git = "https://github.com/oxidecomputer/progenitor"
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

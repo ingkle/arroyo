@@ -1,0 +1,26 @@
+on: [push, pull_request]
+
+name: Actions CI
+
+jobs:
+  build_and_test:
+    name: integer-encoding-rs
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["tokio_async", "futures_async", ""]
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --no-default-features --features=${{ matrix.features }}
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --no-default-features --features=${{ matrix.features }}
