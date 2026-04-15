@@ -1,5 +1,7 @@
 /target/
-.idea
-.env
-.vscode/
+/.idea
+/.env
+/.vscode/
 
+# vendor는 통째로 포함 (오프라인 빌드)
+!vendor/
