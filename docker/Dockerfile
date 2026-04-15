@@ -46,8 +46,8 @@ COPY docker/refinery.toml refinery.toml
 ENV LIBRARY_PATH=/usr/local/lib \
     RUSTFLAGS="-L native=/usr/local/lib -Clink-arg=-Wl,-rpath,/usr/local/lib"
 
-RUN mkdir -p /tmp/empty-swagger
-ENV SWAGGER_UI_OVERWRITE_FOLDER=/tmp/empty-swagger
+COPY docker/swagger-ui/v5.17.12.zip /tmp/swagger-ui.zip
+ENV SWAGGER_UI_DOWNLOAD_URL=file:///tmp/swagger-ui.zip
 
 RUN service postgresql start && \
     sudo -u postgres psql -c "CREATE USER arroyo WITH PASSWORD 'arroyo' SUPERUSER;" && \
