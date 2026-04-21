@@ -17,7 +17,7 @@ use deltalake::{
 
 use deltalake::kernel::transaction::CommitBuilder;
 use deltalake::operations::write::{SchemaMode, WriteBuilder};
-use parquet::basic::Compression;
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use itertools::Itertools;
 use object_store::ObjectStore;
@@ -205,7 +205,9 @@ pub(crate) async fn write_batches_to_delta(
     partition_columns: Vec<String>,
 ) -> Result<i64> {
     let writer_props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
+        .set_compression(Compression::ZSTD(
+            ZstdLevel::try_new(3).expect("zstd level 3 should be valid"),
+        ))
         .build();
 
     let mut builder = WriteBuilder::new(table.log_store(), table.snapshot().ok().cloned())

@@ -38,7 +38,9 @@ fn writer_properties_from_format(format: &ParquetFormat) -> (WriterProperties, u
         ParquetCompression::Uncompressed => parquet::basic::Compression::UNCOMPRESSED,
         ParquetCompression::Snappy => parquet::basic::Compression::SNAPPY,
         ParquetCompression::Gzip => parquet::basic::Compression::GZIP(GzipLevel::default()),
-        ParquetCompression::Zstd => parquet::basic::Compression::ZSTD(ZstdLevel::default()),
+        ParquetCompression::Zstd => parquet::basic::Compression::ZSTD(
+            ZstdLevel::try_new(3).expect("zstd level 3 should be valid"),
+        ),
         ParquetCompression::Lz4 => parquet::basic::Compression::LZ4,
         ParquetCompression::Lz4Raw => parquet::basic::Compression::LZ4_RAW,
     });
